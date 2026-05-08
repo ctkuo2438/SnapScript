@@ -1,7 +1,18 @@
-.DS_Store
-.venv/
-.ruff_cache/
+# Python
 __pycache__/
 *.pyc
+.venv/
+.ruff_cache/
+
+# Environment
 .env
+
+# macOS
+.DS_Store
+
+# Per-agent local working directories (not the agent configs in repo root)
+.claude/
 .gstack/
+
+# Backup files
+*.bak

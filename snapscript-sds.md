@@ -399,50 +399,50 @@ $ snapscript "去除 email 重複的行，保留最新一筆" -f customers.csv
 **Page layout**：
 
 ```
-┌──────────────────────────────────────────────┐
-│  SnapScript                    [API Key: •••] │
-├──────────────────────────────────────────────┤
-│                                              │
-│  ┌────────────────────────────────────────┐  │
-│  │  📂 Drag & drop CSV/Excel here        │  │
-│  │     or click to browse                │  │
-│  └────────────────────────────────────────┘  │
-│                                              │
-│  📋 File preview (first 10 rows)            │
-│  ┌────────────────────────────────────────┐  │
-│  │  id | name    | email        | amount  │  │
-│  │  1  | Alice   | a@test.com   | 500     │  │
-│  │  2  | Bob     | b@test.com   | 1200    │  │
-│  │  ...                                   │  │
-│  └────────────────────────────────────────┘  │
-│                                              │
-│  Column info:                                │
-│  • id (int64) — 5000 unique                 │
-│  • name (object) — 4832 unique, 12 nulls    │
-│  • email (object) — 4756 unique, 0 nulls    │
-│  • amount (float64) — range: 0.5 ~ 99999.0 │
-│                                              │
-│  ┌────────────────────────────────────────┐  │
-│  │  Describe your task...                 │  │
-│  │  e.g. "Remove rows where amount < 100" │  │
-│  └────────────────────────────────────────┘  │
-│                                              │
-│  [▶ Generate & Run]                          │
-│                                              │
-│  ─── Results ───────────────────────────────│
-│                                              │
-│  ✅ Processed 5,000 → 3,847 rows (2.3s)     │
-│                                              │
-│  📋 Output preview (first 10 rows)          │
-│  ┌────────────────────────────────────────┐  │
-│  │  id | name    | email        | amount  │  │
-│  │  3  | Carol   | c@test.com   | 2400    │  │
-│  │  ...                                   │  │
-│  └────────────────────────────────────────┘  │
-│                                              │
-│  [📥 Download result]  [👁 View code]        │
-│                                              │
-└──────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────┐
+│  SnapScript                      [API Key: •••]  │
+├──────────────────────────────────────────────────┤
+│                                                  │
+│  ┌────────────────────────────────────────────┐  │
+│  │ Drag & drop CSV/Excel here                 │  │
+│  │    or click to browse                      │  │
+│  └────────────────────────────────────────────┘  │
+│                                                  │
+│  File preview (first 10 rows)                    │
+│  ┌────────────────────────────────────────────┐  │
+│  │ id | name    | email        | amount       │  │
+│  │ 1  | Alice   | a@test.com   | 500          │  │
+│  │ 2  | Bob     | b@test.com   | 1200         │  │
+│  │ ...                                        │  │
+│  └────────────────────────────────────────────┘  │
+│                                                  │
+│  Column info:                                    │
+│  • id (int64) — 5000 unique                      │
+│  • name (object) — 4832 unique, 12 nulls         │
+│  • email (object) — 4756 unique, 0 nulls         │
+│  • amount (float64) — range: 0.5 ~ 99999.0       │
+│                                                  │
+│  ┌────────────────────────────────────────────┐  │
+│  │ Describe your task...                      │  │
+│  │ e.g. "Remove rows where amount < 100"      │  │
+│  └────────────────────────────────────────────┘  │
+│                                                  │
+│  [▶ Generate & Run]                              │
+│                                                  │
+├─── Results ──────────────────────────────────────┤
+│                                                  │
+│  Processed 5,000 → 3,847 rows (2.3s)             │
+│                                                  │
+│  Output preview (first 10 rows)                  │
+│  ┌────────────────────────────────────────────┐  │
+│  │ id | name    | email        | amount       │  │
+│  │ 3  | Carol   | c@test.com   | 2400         │  │
+│  │ ...                                        │  │
+│  └────────────────────────────────────────────┘  │
+│                                                  │
+│  [Download result]  [View code]                  │
+│                                                  │
+└──────────────────────────────────────────────────┘
 ```
 
 **Streamlit components mapping**：
