@@ -37,7 +37,7 @@
 
 ## Foundation Tasks
 
-### Task 1: Package Skeleton
+### Task 1: Package Skeleton ✅
 
 **Goal:** Create importable package and CLI entrypoints.
 
@@ -61,7 +61,7 @@ uv run python main.py --help
 uv run python -m snapscript --help
 ```
 
-### Task 2: App Config
+### Task 2: App Config ✅
 
 **Goal:** Centralize provider/model settings and execution limits.
 
@@ -83,7 +83,7 @@ uv run python -m snapscript --help
 uv run pytest tests/test_config.py
 ```
 
-### Task 3: Core Models
+### Task 3: Core Models ✅
 
 **Goal:** Define shared dataclasses once.
 
@@ -105,7 +105,7 @@ uv run pytest tests/test_config.py
 uv run pytest tests/test_models.py
 ```
 
-### Task 4: Prompt Files
+### Task 4: Prompt Files ✅
 
 **Goal:** Add minimal system and retry prompt templates.
 

@@ -1,0 +1,25 @@
+The previous generated script failed.
+
+Previous error:
+{previous_error}
+
+Previous code:
+{previous_code}
+
+Return corrected executable Python code only.
+
+Requirements:
+- Fix the failure while preserving the original task intent.
+- Do not include markdown fences or explanatory prose.
+- Keep using:
+  from _snapscript_paths import INPUT_PATH, OUTPUT_PATH
+- Read input only from INPUT_PATH.
+- Write the final output to OUTPUT_PATH.
+- Do not overwrite INPUT_PATH.
+- Do not read arbitrary filesystem paths.
+- Do not request interactive user input.
+- Print only a short human-readable processing summary to stdout.
+- Do not print full datasets or large data samples.
+- If the transformation cannot complete, write a user-facing failure message to stderr and exit nonzero.
+- Do not add shell execution, subprocesses, network access, unsafe imports, exec, eval, compile, __import__, globals, locals, getattr, setattr, or delattr.
+- Import only the libraries required for the task.
