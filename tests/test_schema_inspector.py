@@ -1,0 +1,122 @@
+from pathlib import Path
+
+import pandas as pd
+import pytest
+
+from snapscript.config import AppConfig
+from snapscript.core import schema_inspector
+from snapscript.core.models import SchemaReport
+from snapscript.core.schema_inspector import (
+    InputFileTooLargeError,
+    MissingInputFileError,
+    UnsupportedFileTypeError,
+    UnreadableFileError,
+)
+
+
+FIXTURES = Path("tests/fixtures/integration")
+
+
+def test_inspect_csv_reports_schema_without_ui_dependencies() -> None:
+    report = schema_inspector.inspect(FIXTURES / "task_02_orders.csv")
+
+    assert isinstance(report, SchemaReport)
+    assert report.filename == "task_02_orders.csv"
+    assert report.file_type == "csv"
+    assert report.row_count == 500
+    assert report.file_size_bytes > 0
+    assert report.encoding
+    assert report.sheet_names == []
+    assert [column.name for column in report.columns] == [
+        "order_id",
+        "customer",
+        "amount",
+        "status",
+    ]
+    assert report.columns[0].dtype.startswith("int")
+    assert report.columns[0].null_count == 0
+    assert report.columns[0].unique_count == 500
+    assert report.columns[0].sample_values[:3] == ["1", "2", "3"]
+    assert len(report.sample_rows) == AppConfig().schema_sample_rows
+    assert report.sample_rows[0]["customer"] == "bLdoKM"
+
+
+def test_inspect_excel_reports_sheet_names_and_selected_sheet(tmp_path: Path) -> None:
+    workbook = tmp_path / "contacts.xlsx"
+    with pd.ExcelWriter(workbook, engine="openpyxl") as writer:
+        pd.DataFrame(
+            {
+                "name": ["Ada", "Grace", None],
+                "score": [10, 20, 30],
+            }
+        ).to_excel(writer, sheet_name="people", index=False)
+        pd.DataFrame({"ignored": [1]}).to_excel(
+            writer, sheet_name="other", index=False
+        )
+
+    report = schema_inspector.inspect(workbook, sheet="people")
+
+    assert report.filename == "contacts.xlsx"
+    assert report.file_type == "xlsx"
+    assert report.row_count == 3
+    assert report.sheet_names == ["people", "other"]
+    assert [column.name for column in report.columns] == ["name", "score"]
+    assert report.columns[0].null_count == 1
+    assert report.columns[0].unique_count == 2
+    assert report.columns[0].sample_values == ["Ada", "Grace"]
+    assert report.sample_rows[0] == {"name": "Ada", "score": 10}
+
+
+def test_inspect_truncates_column_names_for_prompt_safety(tmp_path: Path) -> None:
+    config = AppConfig()
+    long_column = "x" * (config.max_column_name_chars + 25)
+    csv_path = tmp_path / "long_column.csv"
+    pd.DataFrame({long_column: [1]}).to_csv(csv_path, index=False)
+
+    report = schema_inspector.inspect(csv_path)
+
+    assert report.columns[0].name == "x" * config.max_column_name_chars
+    assert list(report.sample_rows[0]) == ["x" * config.max_column_name_chars]
+
+
+def test_inspect_raises_for_missing_file(tmp_path: Path) -> None:
+    with pytest.raises(MissingInputFileError):
+        schema_inspector.inspect(tmp_path / "missing.csv")
+
+
+def test_inspect_raises_for_unsupported_extension(tmp_path: Path) -> None:
+    text_file = tmp_path / "input.txt"
+    text_file.write_text("name\nAda\n")
+
+    with pytest.raises(UnsupportedFileTypeError):
+        schema_inspector.inspect(text_file)
+
+
+def test_inspect_raises_for_unreadable_supported_file(tmp_path: Path) -> None:
+    workbook = tmp_path / "broken.xlsx"
+    workbook.write_text("not a real workbook")
+
+    with pytest.raises(UnreadableFileError):
+        schema_inspector.inspect(workbook)
+
+
+def test_inspect_raises_for_too_large_file(monkeypatch: pytest.MonkeyPatch) -> None:
+    input_file = FIXTURES / "task_02_orders.csv"
+
+    monkeypatch.setattr(
+        schema_inspector,
+        "AppConfig",
+        lambda: AppConfig(max_input_file_size_bytes=input_file.stat().st_size - 1),
+    )
+
+    with pytest.raises(InputFileTooLargeError):
+        schema_inspector.inspect(input_file)
+
+
+def test_schema_inspector_core_has_no_ui_dependencies() -> None:
+    source = Path("src/snapscript/core/schema_inspector.py").read_text()
+
+    assert "argparse" not in source
+    assert "rich" not in source
+    assert "streamlit" not in source
+    assert "sys.argv" not in source
