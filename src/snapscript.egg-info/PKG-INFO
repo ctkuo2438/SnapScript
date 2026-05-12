@@ -1,0 +1,13 @@
+Metadata-Version: 2.4
+Name: snapscript
+Version: 0.1.0
+Summary: Add your description here
+Requires-Python: >=3.10
+Description-Content-Type: text/markdown
+Requires-Dist: anthropic>=0.86.0
+Requires-Dist: chardet>=7.4.0.post1
+Requires-Dist: openpyxl>=3.1.5
+Requires-Dist: pandas>=2.3.3
+Requires-Dist: python-dotenv>=1.2.2
+Requires-Dist: rich>=14.3.3
+Requires-Dist: streamlit>=1.55.0

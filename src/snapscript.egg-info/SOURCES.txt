@@ -1,0 +1,12 @@
+README.md
+pyproject.toml
+src/snapscript/__init__.py
+src/snapscript/__main__.py
+src/snapscript.egg-info/PKG-INFO
+src/snapscript.egg-info/SOURCES.txt
+src/snapscript.egg-info/dependency_links.txt
+src/snapscript.egg-info/requires.txt
+src/snapscript.egg-info/top_level.txt
+src/snapscript/core/__init__.py
+src/snapscript/interfaces/__init__.py
+src/snapscript/interfaces/cli.py
