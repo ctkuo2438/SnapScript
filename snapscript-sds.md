@@ -28,9 +28,13 @@ SnapScript 是一個「描述需求，秒生成並執行一次性腳本」的工
 
 | Phase | 目標 | 形式 | 時程 |
 |-------|------|------|------|
-| Phase 1 | 驗證核心管道能跑通 | CLI tool | 3 天 |
-| Phase 2 | 使用者測試、收集回饋 | Streamlit Web UI | 5 天 |
+| Phase 1 | 驗證核心管道能跑通，所有 10 個 CLI gate tasks 可執行 | CLI tool | Days 1-10 |
+| Prompt iteration gate | 針對 10 個 CLI tasks 迭代 `prompts/system.txt`，達到 8/10 first-attempt pass | CLI prompt engineering | Days 8-10 |
+| Phase 2 | 使用者測試、收集回饋 | Streamlit Web UI | Days 11-25 |
+| User observation | 觀察真實使用者、記錄 failure modes | Moderated testing | Days 26-30 |
 | Phase 3 | 產品化、擴大使用者群 | Tauri desktop app | PMF 驗證後 |
+
+總時程為 30 天。Day 7 前核心 CLI pipeline 必須可跑完 10 個 gate tasks；Days 8-10 保留給 prompt engineering，不新增產品功能。Phase 2 只有在 10 個 CLI tasks 中至少 8 個可 first attempt 成功（不依賴 retry）後才開始。
 
 ---
 
@@ -109,6 +113,7 @@ class ColumnInfo:
 - 編碼偵測使用 `chardet` 或 `charset-normalizer`，偵測失敗時 fallback 到 utf-8。
 - Excel 多 sheet 時，預設讀取第一個 sheet，但在 SchemaReport 中列出所有 sheet 名稱讓使用者選擇。
 - 檔案大小超過 500MB 時拒絕處理並提示使用者。
+- 欄位名稱在放入 SchemaReport 前截斷為最多 100 字元，降低 prompt injection 與 token 膨脹風險。
 
 ---
 
@@ -123,8 +128,8 @@ System prompt:
   你是一個 Python 資料處理腳本生成器。
   你只能使用以下 library：pandas, openpyxl, csv, json, re, datetime, pathlib。
   你必須遵守以下規則：
-  1. 讀取路徑固定為 INPUT_PATH（由呼叫方注入）。
-  2. 輸出路徑固定為 OUTPUT_PATH（由呼叫方注入）。
+  1. 腳本必須從 `_snapscript_paths` 匯入 INPUT_PATH 與 OUTPUT_PATH。
+  2. 讀取路徑固定為 INPUT_PATH，輸出路徑固定為 OUTPUT_PATH。
   3. 不得使用 os.system(), subprocess, exec, eval, __import__。
   4. 不得進行任何網路請求。
   5. 結果必須寫入 OUTPUT_PATH，並在 stdout 印出摘要。
@@ -132,6 +137,7 @@ System prompt:
   7. 只輸出 Python code，不要 markdown 包裹，不要解釋文字。
 
 User prompt:
+  <schema>
   ## 輸入檔案資訊
   - 檔名：{filename}
   - 類型：{file_type}
@@ -141,6 +147,7 @@ User prompt:
 
   ## 範例資料（前 5 行）
   {sample_rows 的 markdown 表格}
+  </schema>
 
   ## 任務描述
   {使用者的自然語言輸入}
@@ -151,7 +158,8 @@ User prompt:
 ```
 
 **Implementation notes**：
-- `INPUT_PATH` 和 `OUTPUT_PATH` 作為 placeholder 寫進 prompt，在實際執行時由 Sandbox Executor 替換為真實路徑。
+- Schema 內容一律包在 `<schema>...</schema>` delimiters 中，讓系統 prompt 可明確要求模型把 schema 當資料而非指令。
+- `INPUT_PATH` 和 `OUTPUT_PATH` 作為固定變數名寫進 prompt；Sandbox Executor 透過 `_snapscript_paths.py` 提供真實路徑，不做 generated code 的字串替換。
 - 輸出格式的推斷邏輯：輸入是 CSV → 輸出 CSV；輸入是 Excel → 輸出 Excel；使用者在描述中指定了格式則以使用者為準。
 - Token 預算控制：如果 schema + sample 超過 2000 tokens，truncate sample_rows 到 3 行，再不夠就移除 sample_values。
 
@@ -161,9 +169,15 @@ User prompt:
 
 **Purpose**：呼叫 Claude API，取得生成的 Python 腳本，並做後處理。
 
-**Input**：組裝好的 prompt（from prompt_builder）
+**Input**：組裝好的 prompt（from prompt_builder），以及可選的 model override
 
 **Output**：`GeneratedScript` dataclass
+
+**API**：
+
+```python
+generate(prompt: str, model: str | None = None) -> GeneratedScript
+```
 
 ```python
 @dataclass
@@ -189,7 +203,7 @@ CLAUDE_CONFIG = {
 1. Strip markdown code fences（如果 Claude 不小心包了 ```python ... ```）。
 2. 移除任何非 Python code 的前後文字說明。
 3. 驗證生成的 code 是合法 Python（`ast.parse()`）。
-4. 注入 INPUT_PATH / OUTPUT_PATH 的實際值（`str.replace()`）。
+4. 不修改 generated code 中的路徑；執行時由 Sandbox Executor 在工作區寫入 `_snapscript_paths.py`，提供 `INPUT_PATH` / `OUTPUT_PATH`。
 
 **為什麼用 Sonnet 而非 Opus**：資料處理腳本的複雜度通常不高，Sonnet 的程式碼品質已足夠，且 token 成本低 5-10x，對需要 retry 的場景更友善。如果 Sonnet 連續失敗 2 次，可以 fallback 到 Opus。
 
@@ -212,7 +226,6 @@ BLOCKED_IMPORTS = {
 BLOCKED_CALLS = {
     "exec", "eval", "compile", "__import__",
     "globals", "locals", "getattr", "setattr", "delattr",
-    "open",  # 只允許透過 pandas 讀寫，不允許直接 open()
 }
 
 BLOCKED_ATTRIBUTES = {
@@ -226,7 +239,7 @@ BLOCKED_ATTRIBUTES = {
 2. Walk AST nodes，檢查 `Import` / `ImportFrom` 是否在 BLOCKED_IMPORTS 中。
 3. 檢查 `Call` nodes 的函數名是否在 BLOCKED_CALLS 中。
 4. 檢查 `Attribute` access 是否匹配 BLOCKED_ATTRIBUTES。
-5. 檢查是否有 `open()` 呼叫——僅允許 pandas 的讀寫方法。
+5. 檢查 `open()` 呼叫：`open()` 本身不全域封鎖，但若第一個參數是 literal string 且包含 `/` 或 `..`，視為 absolute/traversal path 風險並拒絕。
 
 **Output**：`SafetyResult`
 
@@ -259,11 +272,13 @@ EXECUTION_CONFIG = {
 **執行流程**：
 1. 建立 temp directory 作為工作區（`tempfile.mkdtemp()`）。
 2. 將輸入檔案 **複製** 到工作區（不要讓腳本存取原始路徑）。
-3. 將生成的腳本寫入工作區的 `script.py`。
-4. 用 `subprocess.run()` 執行，設定 `timeout`、`cwd` 為工作區。
-5. 捕獲 stdout 和 stderr。
-6. 檢查工作區是否產生了輸出檔案。
-7. 清理工作區（除了輸出檔案）。
+3. 在工作區寫入 `_snapscript_paths.py`，定義 `INPUT_PATH` 與 `OUTPUT_PATH` 指向工作區內的 input/output。
+4. 將生成的腳本原樣寫入工作區的 `script.py`；不使用 `str.replace()` 注入路徑。
+5. 用 `subprocess.run()` 執行，設定 `timeout`、`cwd` 為工作區。
+6. 捕獲 stdout 和 stderr。
+7. 檢查工作區是否產生了輸出檔案，並用 pandas 讀取輸出檔案第一列做 output validation。
+8. 若輸出檔案不存在、為空、或第一列無法讀取，回傳 `ExecutionResult(success=False)`。
+9. 清理工作區（除了輸出檔案）。
 
 **Output**：`ExecutionResult`
 
@@ -326,7 +341,7 @@ Retry prompt template:
 
 **Model escalation**：
 - 前 2 次使用 Sonnet。
-- 如果 Sonnet 連續 2 次失敗，第 3 次（最後一次）自動升級為 Opus。
+- 如果 Sonnet 連續 2 次失敗，第 3 次（最後一次）呼叫 `code_generator.generate(..., model=config.fallback_model)`，自動升級為 fallback model。
 
 ---
 
@@ -468,6 +483,13 @@ $ snapscript "去除 email 重複的行，保留最新一筆" -f customers.csv
 - `generated_code`：GeneratedScript
 - `execution_result`：ExecutionResult
 - `retry_count`：當前 retry 次數
+- `run_count`：本 session 已執行次數，上限 10 次
+- `last_run_at`：上次執行時間，用於 5 秒 cooldown
+
+**Session rate limiting**：
+- Streamlit Cloud 版本使用 session-based rate limiting：每個 session 最多 10 次 Generate & Run。
+- 每次執行後啟用 5 秒 cooldown；cooldown 期間 Generate & Run button disabled。
+- UI 顯示剩餘次數，例如：`3 runs remaining (7 of 10 used this session)`。
 
 ---
 
@@ -485,7 +507,7 @@ schema_inspector.inspect(file_path)
 prompt_builder.build(task_description, schema_report)
   │ → formatted prompt (system + user)
   ▼
-code_generator.generate(prompt)
+code_generator.generate(prompt, model=None)
   │ → GeneratedScript
   ▼
 safety_checker.check(generated_script.code)
@@ -495,7 +517,7 @@ safety_checker.check(generated_script.code)
   │
   ▼
 sandbox_executor.execute(generated_script.code, input_file, output_path)
-  │ → ExecutionResult (success=True)
+  │ → ExecutionResult (success=True after first-row output validation)
   ▼
 Interface displays results + offers download
 ```
@@ -512,8 +534,9 @@ retry_handler.should_retry(execution_result, attempt=1)
 retry_handler.build_retry_prompt(execution_result, previous_code)
   │ → retry prompt
   ▼
-code_generator.generate(retry_prompt)
+code_generator.generate(retry_prompt, model=selected_model)
   │ → new GeneratedScript
+  │   (final retry selected_model=config.fallback_model)
   ▼
 safety_checker.check(...)
   │ → SafetyResult (is_safe=True)
@@ -656,6 +679,11 @@ class AppConfig:
     max_input_file_size_bytes: int = 500 * 1024 * 1024   # 500MB
     schema_sample_rows: int = 5
     schema_inspect_rows: int = 1000
+    max_column_name_chars: int = 100
+
+    # Streamlit session limits
+    streamlit_session_run_limit: int = 10
+    streamlit_run_cooldown_seconds: int = 5
 
     # Safety
     allowed_imports: frozenset = frozenset({
@@ -705,7 +733,7 @@ class AppConfig:
 | LLM 生成外傳使用者資料的程式碼 | safety_checker 攔截網路相關 import + Phase 3 Docker `--network=none` |
 | 使用者上傳惡意檔案（如 zip bomb） | 檔案大小限制 500MB + schema_inspector 只讀前 1000 行 |
 | 腳本無限迴圈耗盡資源 | subprocess timeout 30s + Phase 3 Docker memory limit |
-| Prompt injection via 檔案內容 | Schema inspector 只傳 column names + sample values，不傳完整內容 |
+| Prompt injection via 檔案內容 | Schema inspector 只傳 column names + sample values、不傳完整內容；欄位名稱截斷為 100 字元，prompt_builder 用 `<schema>...</schema>` 包住 schema |
 
 ### 9.2 Phase 1 vs Phase 3 security comparison
 
@@ -723,17 +751,22 @@ class AppConfig:
 
 ### 10.1 Unit tests
 
-- `test_schema_inspector.py`：各種 CSV/Excel 的 schema 提取（含 encoding 偵測、缺失值、多 sheet）。
-- `test_safety_checker.py`：已知的危險程式碼 pattern 全部能攔截；合法程式碼不會誤判。
-- `test_prompt_builder.py`：不同 schema 組合的 prompt 格式正確、token 不超限。
-- `test_sandbox_executor.py`：正常執行、timeout、stderr 的捕獲。
+- `test_schema_inspector.py`：各種 CSV/Excel 的 schema 提取（含 encoding 偵測、缺失值、多 sheet、欄位名稱 100 字元截斷）。
+- `test_safety_checker.py`：已知的危險程式碼 pattern 全部能攔截；合法程式碼不會誤判；`open()` literal path 中含 `/` 或 `..` 時拒絕。
+- `test_prompt_builder.py`：不同 schema 組合的 prompt 格式正確、schema 使用 `<schema>...</schema>` 包住、token 不超限。
+- `test_sandbox_executor.py`：正常執行、timeout、stderr 的捕獲、`_snapscript_paths.py` path injection、output first-row validation。
 
 ### 10.2 Integration tests
 
 - End-to-end happy path：給定一個 CSV + 任務描述 → 呼叫真實 Claude API → 執行 → 驗證輸出檔案正確。
 - Error retry path：故意提供會導致 KeyError 的任務描述 → 驗證 retry 能修正。
+- CLI gate tasks：Day 7 前所有 10 個 tasks 必須可執行；Days 8-10 迭代 `prompts/system.txt`，Phase 2 gate 為 8/10 first-attempt pass。
 
-### 10.3 Test fixtures
+### 10.3 Deployment gate
+
+Streamlit Cloud deployment 由 GitHub Actions 觸發：pytest 通過後呼叫 Streamlit Cloud webhook 部署。不要使用手動部署作為常規 release path。
+
+### 10.4 Test fixtures
 
 在 `tests/fixtures/` 準備：
 - `sample.csv`：100 行，含常見的 dirty data（重複、空值、格式不一致）。
@@ -761,6 +794,6 @@ Phase 3 前端使用 React + Tauri，Python 後端以 FastAPI 形式運行於 `l
 
 | Tier | Price | Limits |
 |------|-------|--------|
-| Free | $0 | 5 executions/day, user's own API key |
+| Free | $0 | TBD product limit; Phase 2 public demo uses 10 runs/session, user's own API key |
 | Pro | $9.99/mo | Unlimited, built-in API key, execution history, priority retry |
 | Team | $29.99/mo/seat | Shared templates, audit log, SSO |
