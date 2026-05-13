@@ -180,7 +180,7 @@ uv run pytest tests/test_schema_inspector.py
 uv run pytest tests/test_prompt_builder.py
 ```
 
-### Task 7: `code_generator.py`
+### Task 7: `code_generator.py` ✅
 
 **Goal:** Generate clean Python from `PromptPayload` via the configured LLM provider.
 
@@ -206,7 +206,7 @@ uv run pytest tests/test_prompt_builder.py
 uv run pytest tests/test_code_generator.py
 ```
 
-### Task 8: `safety_checker.py`
+### Task 8: `safety_checker.py` ✅
 
 **Goal:** Reject unsafe generated code before sandbox execution.
 
