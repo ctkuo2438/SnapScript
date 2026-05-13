@@ -131,7 +131,7 @@ test -f src/snapscript/prompts/retry.txt
 
 ## Core Pipeline Tasks
 
-### Task 5: `schema_inspector.py`
+### Task 5: `schema_inspector.py` ✅
 
 **Goal:** Extract safe schema summaries from CSV/Excel without reading whole large files.
 
@@ -155,7 +155,7 @@ test -f src/snapscript/prompts/retry.txt
 uv run pytest tests/test_schema_inspector.py
 ```
 
-### Task 6: `prompt_builder.py`
+### Task 6: `prompt_builder.py` ✅
 
 **Goal:** Convert task + schema into a `PromptPayload` with separate system and user prompts.
 

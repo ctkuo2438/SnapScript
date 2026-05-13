@@ -1,0 +1,103 @@
+from __future__ import annotations
+
+import json
+from copy import deepcopy
+from pathlib import Path, PureWindowsPath
+from typing import Any
+
+from snapscript.config import AppConfig
+from snapscript.core.models import ColumnInfo, PromptPayload, SchemaReport
+
+
+PROMPT_DIR = Path(__file__).resolve().parents[1] / "prompts"
+SYSTEM_PROMPT_PATH = PROMPT_DIR / "system.txt"
+
+
+def build(task_description: str, schema: SchemaReport) -> PromptPayload:
+    config = AppConfig()
+    system_prompt = _load_system_prompt()
+    schema_data = _schema_to_prompt_data(schema)
+    user_prompt = _build_user_prompt(task_description, schema_data)
+
+    if _estimate_tokens(system_prompt + user_prompt) > config.max_prompt_tokens:
+        schema_data = _truncate_schema_samples(schema_data)
+        user_prompt = _build_user_prompt(task_description, schema_data)
+
+    return PromptPayload(
+        system_prompt=system_prompt,
+        user_prompt=user_prompt,
+    )
+
+# load system prompt from file
+def _load_system_prompt() -> str:
+    return SYSTEM_PROMPT_PATH.read_text(encoding="utf-8").strip()
+
+
+def _build_user_prompt(task_description: str, schema_data: dict[str, Any]) -> str:
+    schema_json = _escape_schema_json(
+        json.dumps(schema_data, indent=2, ensure_ascii=False, default=str)
+    )
+    return (
+        "## Input file information\n"
+        "<schema>\n"
+        f"{schema_json}\n"
+        "</schema>\n\n"
+        "## Task description\n"
+        f"{task_description.strip()}\n\n"
+        "## Output requirement\n"
+        "Read the input file by using INPUT_PATH as the input path variable. "
+        "Write exactly one primary output file to OUTPUT_PATH. Infer the "
+        "output format from OUTPUT_PATH."
+    )
+
+# helper functions to transform SchemaReport and ColumnInfo into dicts that can be easily converted to JSON for the prompt
+# input: SchemaReport and ColumnInfo dataclasses
+# output: dicts with only primitive types that can be serialized to JSON, with some fields
+# deal with file level information
+def _schema_to_prompt_data(schema: SchemaReport) -> dict[str, Any]:
+    return {
+        "filename": _safe_filename(schema.filename),
+        "file_type": schema.file_type,
+        "row_count": schema.row_count,
+        "file_size_bytes": schema.file_size_bytes,
+        "encoding": schema.encoding,
+        "sheet_names": list(schema.sheet_names),
+        "columns": [_column_to_prompt_data(column) for column in schema.columns],
+        "sample_rows": deepcopy(schema.sample_rows),
+    }
+
+# input: ColumnInfo
+# deal with column-level information
+def _column_to_prompt_data(column: ColumnInfo) -> dict[str, Any]:
+    return {
+        "name": column.name,
+        "dtype": column.dtype,
+        "null_count": column.null_count,
+        "unique_count": column.unique_count,
+        "sample_values": list(column.sample_values),
+    }
+
+
+def _truncate_schema_samples(schema_data: dict[str, Any]) -> dict[str, Any]:
+    truncated = deepcopy(schema_data)
+    truncated["sample_rows"] = []
+    truncated["sample_rows_note"] = "[truncated to fit prompt budget]"
+
+    for column in truncated["columns"]:
+        if column["sample_values"]:
+            column["sample_values"] = []
+            column["sample_values_note"] = "[truncated to fit prompt budget]"
+
+    return truncated
+
+
+def _estimate_tokens(text: str) -> int:
+    return max(1, (len(text) + 3) // 4)
+
+def _escape_schema_json(schema_json: str) -> str:
+    return schema_json.replace("<", "\\u003c").replace(">", "\\u003e")
+
+
+def _safe_filename(filename: str) -> str:
+    posix_name = Path(filename).name
+    return PureWindowsPath(posix_name).name
