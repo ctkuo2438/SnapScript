@@ -20,6 +20,6 @@ Requirements:
 - Do not request interactive user input.
 - Print only a short human-readable processing summary to stdout.
 - Do not print full datasets or large data samples.
-- If the transformation cannot complete, write a user-facing failure message to stderr and exit nonzero.
+- If the transformation cannot complete, handle the failure clearly and concisely.
 - Do not add shell execution, subprocesses, network access, unsafe imports, exec, eval, compile, __import__, globals, locals, getattr, setattr, or delattr.
 - Import only the libraries required for the task.

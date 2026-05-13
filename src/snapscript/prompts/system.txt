@@ -33,7 +33,6 @@ Allowed standard libraries:
 - math
 - decimal
 - typing
-- sys
 
 Allowed third-party libraries:
 - pandas
@@ -49,8 +48,8 @@ Forbidden operations:
 - Do not import os, subprocess, shutil, socket, http, urllib, requests, ftplib, smtplib, pickle, shelve, ctypes, importlib, code, or codeop.
 
 Error handling:
-- Wrap the main logic so user-facing failures are written to stderr.
-- Let the process exit nonzero when the transformation cannot complete.
+- Handle failures clearly and concisely.
+- Raise a clear exception or terminate cleanly when the transformation cannot complete.
 
 Output contract:
 - Save exactly one primary output file at OUTPUT_PATH.
