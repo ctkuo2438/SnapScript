@@ -230,7 +230,7 @@ uv run pytest tests/test_code_generator.py
 uv run pytest tests/test_safety_checker.py
 ```
 
-### Task 9: `sandbox_executor.py`
+### Task 9: `sandbox_executor.py` ✅
 
 **Goal:** Execute generated code in a temp workspace, validate output, and copy validated output to the requested destination.
 
@@ -257,7 +257,7 @@ uv run pytest tests/test_safety_checker.py
 uv run pytest tests/test_sandbox_executor.py
 ```
 
-### Task 10: `retry_handler.py`
+### Task 10: `retry_handler.py` ✅
 
 **Goal:** Decide when to retry and when to escalate to fallback model.
 
@@ -280,7 +280,7 @@ uv run pytest tests/test_sandbox_executor.py
 uv run pytest tests/test_retry_handler.py
 ```
 
-### Task 11: `interfaces/cli.py`
+### Task 11: `interfaces/cli.py` ✅
 
 **Goal:** Wire the core pipeline into a usable CLI.
 
