@@ -378,7 +378,7 @@ uv run pytest tests/test_pipeline_cli_integration.py
 
 Use existing fixtures in `tests/fixtures/integration/`. These are the Day 7 runnable gate set and Days 8-10 prompt iteration set.
 
-### Task 15: Define Gate Task Assertions
+### Task 15: Define Gate Task Assertions ✅
 
 **Goal:** Turn the existing 10 fixtures into executable assertions.
 
@@ -414,7 +414,7 @@ uv run pytest tests/integration/test_cli_gate_tasks.py
 
 ## Verification Gates
 
-### Task 16: Gate - Minimal Working Path
+### Task 16: Gate - Minimal Working Path ✅
 
 **Goal:** Confirm the core CLI pipeline works before hardening.
 
@@ -430,7 +430,7 @@ uv run pytest tests/integration/test_cli_gate_tasks.py
 uv run pytest tests/test_config.py tests/test_models.py tests/test_schema_inspector.py tests/test_prompt_builder.py tests/test_code_generator.py tests/test_safety_checker.py tests/test_sandbox_executor.py tests/test_retry_handler.py tests/test_cli.py tests/test_pipeline_cli_integration.py
 ```
 
-### Task 17: Gate - Safety Hardening Complete
+### Task 17: Gate - Safety Hardening Complete ✅
 
 **Goal:** Confirm generated code cannot skip static safety or output validation.
 
