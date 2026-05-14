@@ -53,6 +53,7 @@ print("filtered rows")
 
     output = pd.read_csv(output_path)
     assert output["order_id"].tolist() == [2, 3]
+    assert len(output) == 2
 
 
 def test_execute_returns_failure_when_output_is_missing(tmp_path: Path) -> None:
@@ -90,19 +91,41 @@ Path(OUTPUT_PATH).write_text("")
 
 def test_execute_returns_failure_when_output_is_unreadable(tmp_path: Path) -> None:
     input_path = tmp_path / "orders.csv"
-    output_path = tmp_path / "broken.xlsx"
+    output_path = tmp_path / "broken.csv"
     _write_input_csv(input_path)
     code = """
-from pathlib import Path
 from _snapscript_paths import OUTPUT_PATH
 
-Path(OUTPUT_PATH).write_text("not a workbook")
+with open(OUTPUT_PATH, "wb") as file:
+    file.write(b"\\xff\\xfe\\x00not-a-valid-csv")
 """
 
     result = sandbox_executor.execute(code, input_path, output_path)
 
     assert result.success is False
     assert "Output unreadable" in result.stderr
+    assert not output_path.exists()
+    assert input_path.exists()
+
+
+def test_execute_returns_failure_when_output_csv_has_no_data_rows(
+    tmp_path: Path,
+) -> None:
+    input_path = tmp_path / "orders.csv"
+    output_path = tmp_path / "header_only.csv"
+    _write_input_csv(input_path)
+    code = """
+from _snapscript_paths import OUTPUT_PATH
+
+with open(OUTPUT_PATH, "w", encoding="utf-8") as file:
+    file.write("order_id,amount\\n")
+"""
+
+    result = sandbox_executor.execute(code, input_path, output_path)
+
+    assert result.success is False
+    assert result.stderr
+    assert "empty" in result.stderr.lower()
     assert not output_path.exists()
     assert input_path.exists()
 
@@ -162,8 +185,35 @@ df.to_csv(OUTPUT_PATH, index=False)
 
     assert result.success is True
     assert output_path.exists()
-    assert pd.read_csv(output_path).shape == (3, 2)
+    output = pd.read_csv(output_path)
+    assert output.shape == (3, 2)
+    assert output["amount"].tolist() == [500, 1500, 2500]
     assert input_path.exists()
+
+
+def test_execute_creates_paths_module_during_execution(tmp_path: Path) -> None:
+    input_path = tmp_path / "orders.csv"
+    output_path = tmp_path / "paths_module.csv"
+    _write_input_csv(input_path)
+    code = """
+from pathlib import Path
+import pandas as pd
+from _snapscript_paths import INPUT_PATH, OUTPUT_PATH
+
+assert Path("_snapscript_paths.py").exists()
+assert Path(INPUT_PATH).exists()
+assert OUTPUT_PATH
+
+df = pd.read_csv(INPUT_PATH)
+df.to_csv(OUTPUT_PATH, index=False)
+"""
+
+    result = sandbox_executor.execute(code, input_path, output_path)
+
+    assert result.success is True
+    assert output_path.exists()
+    output = pd.read_csv(output_path)
+    assert output["order_id"].tolist() == [1, 2, 3]
 
 
 def test_sandbox_executor_core_has_no_ui_dependencies() -> None:
