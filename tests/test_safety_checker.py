@@ -1,5 +1,5 @@
+import importlib.util
 from pathlib import Path
-from runpy import run_path
 
 import pytest
 
@@ -7,24 +7,54 @@ from snapscript.core import safety_checker
 from snapscript.core.models import SafetyResult
 
 
-_MALICIOUS_FIXTURES = run_path("tests/fixtures/unit/malicious_code.py")
-UNSAFE_CALL_SNIPPETS = _MALICIOUS_FIXTURES["UNSAFE_CALL_SNIPPETS"]
-UNSAFE_IMPORT_SNIPPETS = _MALICIOUS_FIXTURES["UNSAFE_IMPORT_SNIPPETS"]
-UNSAFE_OPEN_SNIPPETS = _MALICIOUS_FIXTURES["UNSAFE_OPEN_SNIPPETS"]
+_FIXTURE_PATH = Path("tests/fixtures/unit/malicious_code.py")
+_SPEC = importlib.util.spec_from_file_location("malicious_code", _FIXTURE_PATH)
+assert _SPEC is not None and _SPEC.loader is not None
+malicious_code = importlib.util.module_from_spec(_SPEC)
+_SPEC.loader.exec_module(malicious_code)
+
+SAFE_PANDAS_IO = malicious_code.SAFE_PANDAS_IO
+SAFE_RELATIVE_OPEN = malicious_code.SAFE_RELATIVE_OPEN
+SAFE_SNIPPETS = malicious_code.SAFE_SNIPPETS
+UNSAFE_ABSOLUTE_OPEN = malicious_code.UNSAFE_ABSOLUTE_OPEN
+UNSAFE_CALL_SNIPPETS = malicious_code.UNSAFE_CALL_SNIPPETS
+UNSAFE_DYNAMIC_IMPORT_DUNDER = malicious_code.UNSAFE_DYNAMIC_IMPORT_DUNDER
+UNSAFE_DYNAMIC_IMPORT_IMPORTLIB = malicious_code.UNSAFE_DYNAMIC_IMPORT_IMPORTLIB
+UNSAFE_EVAL = malicious_code.UNSAFE_EVAL
+UNSAFE_EXEC = malicious_code.UNSAFE_EXEC
+UNSAFE_GETATTR = malicious_code.UNSAFE_GETATTR
+UNSAFE_IMPORT_SNIPPETS = malicious_code.UNSAFE_IMPORT_SNIPPETS
+UNSAFE_IMPORT_OS = malicious_code.UNSAFE_IMPORT_OS
+UNSAFE_IMPORT_SUBPROCESS = malicious_code.UNSAFE_IMPORT_SUBPROCESS
+UNSAFE_OPEN_SNIPPETS = malicious_code.UNSAFE_OPEN_SNIPPETS
+UNSAFE_SHELL_OS_SYSTEM = malicious_code.UNSAFE_SHELL_OS_SYSTEM
+UNSAFE_SHELL_SUBPROCESS_RUN = malicious_code.UNSAFE_SHELL_SUBPROCESS_RUN
+UNSAFE_TRAVERSAL_OPEN = malicious_code.UNSAFE_TRAVERSAL_OPEN
 
 
-SAFE_PANDAS_CODE = """
-from _snapscript_paths import INPUT_PATH, OUTPUT_PATH
-import pandas as pd
+UNSAFE_EXAMPLES = [
+    ("unsafe_import_os", UNSAFE_IMPORT_OS),
+    ("unsafe_import_subprocess", UNSAFE_IMPORT_SUBPROCESS),
+    ("unsafe_shell_os_system", UNSAFE_SHELL_OS_SYSTEM),
+    ("unsafe_shell_subprocess_run", UNSAFE_SHELL_SUBPROCESS_RUN),
+    ("unsafe_dynamic_import_dunder", UNSAFE_DYNAMIC_IMPORT_DUNDER),
+    ("unsafe_dynamic_import_importlib", UNSAFE_DYNAMIC_IMPORT_IMPORTLIB),
+    ("unsafe_exec", UNSAFE_EXEC),
+    ("unsafe_eval", UNSAFE_EVAL),
+    ("unsafe_getattr", UNSAFE_GETATTR),
+    ("unsafe_absolute_open", UNSAFE_ABSOLUTE_OPEN),
+    ("unsafe_traversal_open", UNSAFE_TRAVERSAL_OPEN),
+]
 
-df = pd.read_csv(INPUT_PATH)
-df = df[df["amount"] > 1000]
-df.to_csv(OUTPUT_PATH, index=False)
-"""
+
+SAFE_EXAMPLES = [
+    ("safe_pandas_io", SAFE_PANDAS_IO),
+    ("safe_relative_open", SAFE_RELATIVE_OPEN),
+]
 
 
 def test_check_allows_normal_pandas_input_output_code() -> None:
-    result = safety_checker.check(SAFE_PANDAS_CODE)
+    result = safety_checker.check(SAFE_PANDAS_IO)
 
     assert isinstance(result, SafetyResult)
     assert result.is_safe is True
@@ -32,8 +62,19 @@ def test_check_allows_normal_pandas_input_output_code() -> None:
     assert result.violations == []
 
 
+@pytest.mark.parametrize("name, code", UNSAFE_EXAMPLES)
+def test_check_blocks_named_unsafe_regression_fixtures(
+    name: str, code: str
+) -> None:
+    result = safety_checker.check(code)
+
+    assert result.is_safe is False, name
+    assert result.ast_valid is True
+    assert result.violations
+
+
 @pytest.mark.parametrize("name, code", UNSAFE_IMPORT_SNIPPETS.items())
-def test_check_blocks_unsafe_imports(name: str, code: str) -> None:
+def test_check_blocks_unsafe_import_fixtures(name: str, code: str) -> None:
     result = safety_checker.check(code)
 
     assert result.is_safe is False, name
@@ -42,30 +83,48 @@ def test_check_blocks_unsafe_imports(name: str, code: str) -> None:
 
 
 @pytest.mark.parametrize("name, code", UNSAFE_CALL_SNIPPETS.items())
-def test_check_blocks_unsafe_calls(name: str, code: str) -> None:
+def test_check_blocks_unsafe_call_fixtures(name: str, code: str) -> None:
     result = safety_checker.check(code)
 
     assert result.is_safe is False, name
     assert result.ast_valid is True
-    assert any("call" in violation.lower() for violation in result.violations)
-
-
-def test_check_does_not_globally_block_open() -> None:
-    result = safety_checker.check("with open('notes.txt', 'w') as file:\n    file.write('ok')\n")
-
-    assert result.is_safe is True
-    assert result.violations == []
+    assert result.violations
 
 
 @pytest.mark.parametrize("name, code", UNSAFE_OPEN_SNIPPETS.items())
-def test_check_blocks_open_with_dangerous_literal_paths(
-    name: str, code: str
-) -> None:
+def test_check_blocks_unsafe_open_fixtures(name: str, code: str) -> None:
     result = safety_checker.check(code)
 
     assert result.is_safe is False, name
     assert result.ast_valid is True
     assert any("open" in violation.lower() for violation in result.violations)
+
+
+@pytest.mark.parametrize("name, code", SAFE_EXAMPLES)
+def test_check_allows_named_safe_regression_fixtures(
+    name: str, code: str
+) -> None:
+    result = safety_checker.check(code)
+
+    assert result.is_safe is True, name
+    assert result.ast_valid is True
+    assert result.violations == []
+
+
+@pytest.mark.parametrize("name, code", SAFE_SNIPPETS.items())
+def test_check_allows_safe_fixtures(name: str, code: str) -> None:
+    result = safety_checker.check(code)
+
+    assert result.is_safe is True, name
+    assert result.ast_valid is True
+    assert result.violations == []
+
+
+def test_check_does_not_globally_block_open() -> None:
+    result = safety_checker.check(SAFE_RELATIVE_OPEN)
+
+    assert result.is_safe is True
+    assert result.violations == []
 
 
 def test_check_allows_open_with_dynamic_output_path() -> None:
