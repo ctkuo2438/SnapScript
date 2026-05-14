@@ -310,7 +310,7 @@ uv run python main.py --help
 
 ## Safety And Testing Tasks
 
-### Task 12: Malicious Fixtures And Safety Regression Suite
+### Task 12: Malicious Fixtures And Safety Regression Suite ✅
 
 **Goal:** Keep known unsafe patterns explicit and tested.
 
@@ -330,7 +330,7 @@ uv run python main.py --help
 uv run pytest tests/test_safety_checker.py
 ```
 
-### Task 13: Sandbox Output Validation Tests
+### Task 13: Sandbox Output Validation Tests ✅
 
 **Goal:** Prove "script exited 0" is not enough.
 
