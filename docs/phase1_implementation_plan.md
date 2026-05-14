@@ -353,7 +353,7 @@ uv run pytest tests/test_safety_checker.py
 uv run pytest tests/test_sandbox_executor.py
 ```
 
-### Task 14: Minimal End-To-End CLI Test Without Real API
+### Task 14: Minimal End-To-End CLI Test Without Real API ✅
 
 **Goal:** Verify pipeline wiring without spending API calls.
 
