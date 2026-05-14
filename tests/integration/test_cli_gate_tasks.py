@@ -314,8 +314,8 @@ def test_cli_gate_task(
     original_execute = cli.sandbox_executor.execute
 
     def check_spy(code: str) -> SafetyResult:
-        safety_calls.append(code)
-        return original_check(code)
+        safety_calls.append(code) # append the code being checked to the safety_calls list
+        return original_check(code) # call the original safety check function and return its result
 
     def execute_spy(
         code: str, input_path_arg: Path, output_path_arg: Path
