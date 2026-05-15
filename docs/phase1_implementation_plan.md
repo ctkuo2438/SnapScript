@@ -489,7 +489,7 @@ uv run pytest tests/integration/test_cli_gate_tasks.py
 SNAPSCRIPT_REAL_PROVIDER=1 uv run pytest tests/integration/test_cli_gate_tasks.py
 ```
 
-### Task 20: Gate - Before Phase 2 Streamlit
+### Task 20: Gate - Before Phase 2 Streamlit ✅
 
 **Goal:** Enforce no premature web work.
 
@@ -507,5 +507,5 @@ SNAPSCRIPT_REAL_PROVIDER=1 uv run pytest tests/integration/test_cli_gate_tasks.p
 **Suggested verification command:**
 ```bash
 uv run pytest
-SNAPSCRIPT_RUN_REAL_LLM=1 uv run pytest tests/integration/test_cli_gate_tasks.py
+SNAPSCRIPT_REAL_PROVIDER=1 uv run pytest tests/integration/test_cli_gate_tasks.py
 ```

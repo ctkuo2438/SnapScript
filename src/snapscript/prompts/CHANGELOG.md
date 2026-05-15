@@ -6,6 +6,13 @@ Track prompt changes during Days 8-10 prompt iteration.
 
 - Initial changelog for prompt iteration notes.
 
+## 2026-05-15 Task 20 First-attempt Gate Fix
+
+- Command: custom real-provider harness wrapping `code_generator.generate` to count model calls per CLI gate task.
+- Result before prompt change: 7/10 first-attempt passes. `task_01`, `task_04`, and `task_09` passed only after retry.
+- Failure mode: first attempts treated `OUTPUT_PATH` from `_snapscript_paths.py` as a `pathlib.Path` object and accessed `.suffix`; `task_01` also assigned into a deduplicated DataFrame without copying first.
+- Prompt change: clarify that `INPUT_PATH` and `OUTPUT_PATH` are string paths, require safe suffix checks, and instruct generated pandas code to use `.copy()` before assigning to filtered/sorted/deduplicated DataFrames.
+
 ## 2026-05-15 Task 19 Real-provider Re-run
 
 - Command: `SNAPSCRIPT_REAL_PROVIDER=1 uv run pytest tests/integration/test_cli_gate_tasks.py`
