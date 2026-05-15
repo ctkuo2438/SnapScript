@@ -449,7 +449,7 @@ uv run pytest tests/test_config.py tests/test_models.py tests/test_schema_inspec
 uv run pytest tests/test_safety_checker.py tests/test_sandbox_executor.py
 ```
 
-### Task 18: Gate - Ready For Days 8-10 Prompt Iteration
+### Task 18: Gate - Ready For Days 8-10 Prompt Iteration ✅
 
 **Goal:** Day 7 readiness.
 
@@ -470,7 +470,7 @@ uv run python main.py --help
 uv run pytest tests/integration/test_cli_gate_tasks.py
 ```
 
-### Task 19: Gate - Prompt Iteration Complete
+### Task 19: Gate - Prompt Iteration Complete ✅
 
 **Goal:** Finish Days 8-10.
 
@@ -486,7 +486,7 @@ uv run pytest tests/integration/test_cli_gate_tasks.py
 
 **Suggested opt-in verification command:**
 ```bash
-SNAPSCRIPT_RUN_REAL_LLM=1 uv run pytest tests/integration/test_cli_gate_tasks.py
+SNAPSCRIPT_REAL_PROVIDER=1 uv run pytest tests/integration/test_cli_gate_tasks.py
 ```
 
 ### Task 20: Gate - Before Phase 2 Streamlit
