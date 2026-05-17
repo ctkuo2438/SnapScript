@@ -40,6 +40,37 @@ def get_remaining_runs(
     return max(0, max_runs - run_count)
 
 
+def normalize_task_text(task_text: str) -> str:
+    return task_text.strip()
+
+
+def validate_task_text(task_text: str) -> str:
+    normalized = normalize_task_text(task_text)
+    if not normalized:
+        raise ValueError("Task description is required.")
+    return normalized
+
+
+def can_generate(
+    state: MutableMapping[str, object],
+) -> tuple[bool, str | None]:
+    if (
+        state.get("uploaded_file_bytes") is None
+        or state.get("uploaded_file_suffix") is None
+    ):
+        return False, "Upload a CSV or Excel file before generating."
+
+    try:
+        validate_task_text(str(state.get("task_text", "")))
+    except ValueError as exc:
+        return False, str(exc)
+
+    if int(state.get("run_count", 0)) >= MAX_RUNS_PER_SESSION:
+        return False, "Run limit reached for this session."
+
+    return True, None
+
+
 def validate_upload_suffix(file_name: str) -> str:
     suffix = Path(file_name).suffix.lower()
     if suffix not in ALLOWED_UPLOAD_SUFFIXES:
@@ -127,8 +158,14 @@ def main() -> None:
     remaining_runs = get_remaining_runs(int(st.session_state["run_count"]))
     st.caption(f"Remaining runs this session: {remaining_runs}")
 
-    if st.button("Generate", disabled=remaining_runs == 0):
-        st.info("Generation is not wired yet. This is the Phase 2 skeleton.")
+    can_run, _disabled_reason = can_generate(st.session_state)
+    if st.button("Generate", disabled=not can_run):
+        can_run, validation_error = can_generate(st.session_state)
+        if not can_run:
+            st.session_state["error_message"] = validation_error
+        else:
+            st.session_state["error_message"] = None
+            st.info("Generation is not wired yet. This is the Phase 2 skeleton.")
 
     st.subheader("Output")
     st.info("Output preview will appear here after generation is wired.")
