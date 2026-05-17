@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 from collections.abc import MutableMapping
+from pathlib import Path
 
 import streamlit as st
 
 
 MAX_RUNS_PER_SESSION = 10
+ALLOWED_UPLOAD_SUFFIXES = {".csv", ".xlsx", ".xls"}
+MAX_UPLOAD_BYTES = 10 * 1024 * 1024
 
 SESSION_DEFAULTS: dict[str, object] = {
     "uploaded_file_name": None,
@@ -37,16 +40,84 @@ def get_remaining_runs(
     return max(0, max_runs - run_count)
 
 
+def validate_upload_suffix(file_name: str) -> str:
+    suffix = Path(file_name).suffix.lower()
+    if suffix not in ALLOWED_UPLOAD_SUFFIXES:
+        display_suffix = suffix or "missing extension"
+        raise ValueError(f"Unsupported file type: {display_suffix}")
+    return suffix
+
+
+def validate_upload_size(size_or_bytes: int | bytes) -> None:
+    size = (
+        len(size_or_bytes)
+        if isinstance(size_or_bytes, bytes)
+        else size_or_bytes
+    )
+    if size > MAX_UPLOAD_BYTES:
+        raise ValueError("Upload is too large. Maximum size is 10 MB.")
+
+
+def store_uploaded_file(
+    state: MutableMapping[str, object],
+    file_name: str,
+    file_bytes: bytes,
+) -> None:
+    try:
+        suffix = validate_upload_suffix(file_name)
+        validate_upload_size(file_bytes)
+    except ValueError as exc:
+        state["uploaded_file_name"] = None
+        state["uploaded_file_bytes"] = None
+        state["uploaded_file_suffix"] = None
+        state["error_message"] = str(exc)
+        raise
+
+    state["uploaded_file_name"] = file_name
+    state["uploaded_file_bytes"] = file_bytes
+    state["uploaded_file_suffix"] = suffix
+    state["error_message"] = None
+
+
+def write_upload_to_temp_input(
+    temp_dir: Path,
+    file_bytes: bytes,
+    suffix: str,
+) -> Path:
+    normalized_suffix = validate_upload_suffix(f"input{suffix}")
+    temp_root = temp_dir.resolve()
+    input_path = (temp_root / f"input{normalized_suffix}").resolve()
+    if input_path.parent != temp_root:
+        raise ValueError("Temporary input path must stay inside temp_dir.")
+    input_path.write_bytes(file_bytes)
+    return input_path
+
+
 def main() -> None:
     initialize_session_state()
 
     st.title("SnapScript")
     st.write("Transform a CSV or Excel file with a natural-language task.")
 
-    st.file_uploader(
+    uploaded_file = st.file_uploader(
         "Upload CSV or Excel file",
         type=["csv", "xlsx", "xls"],
     )
+    if uploaded_file is not None:
+        file_bytes = uploaded_file.getvalue()
+        try:
+            store_uploaded_file(
+                st.session_state,
+                uploaded_file.name,
+                file_bytes,
+            )
+        except ValueError:
+            pass
+        else:
+            st.success(
+                f"Uploaded {uploaded_file.name} ({len(file_bytes)} bytes)."
+            )
+
     task_text = st.text_area(
         "Describe the transformation",
         value=str(st.session_state["task_text"]),
