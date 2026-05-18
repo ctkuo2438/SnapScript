@@ -67,6 +67,12 @@ class FakeStreamlit:
     def success(self, *args: object, **kwargs: object) -> None:
         self.calls.append(("success", args, kwargs))
 
+    def dataframe(self, *args: object, **kwargs: object) -> None:
+        self.calls.append(("dataframe", args, kwargs))
+
+    def download_button(self, *args: object, **kwargs: object) -> None:
+        self.calls.append(("download_button", args, kwargs))
+
 
 def _schema() -> SchemaReport:
     return SchemaReport(
@@ -120,11 +126,12 @@ def test_run_uploaded_task_calls_existing_core_flow_with_temp_paths(
         upload_bytes,
         ".csv",
         " Keep large orders. ",
+        uploaded_file_name="orders.csv",
     )
 
     assert result.success is True
     assert returned_output == output_bytes
-    assert output_file_name == "snapscript_output.csv"
+    assert output_file_name == "orders_snapscript_output.csv"
     assert [name for name, _value in calls] == ["inspect", "build", "run"]
 
 
@@ -158,6 +165,7 @@ def test_run_uploaded_task_does_not_store_output_bytes_on_failure(
         b"order_id,amount\n1,1500\n",
         ".csv",
         "Keep large orders.",
+        uploaded_file_name="orders.csv",
     )
 
     assert result.success is False
@@ -178,17 +186,20 @@ def test_main_generate_click_stores_output_bytes_after_success(
     monkeypatch.setattr(
         web,
         "run_uploaded_task",
-        lambda _file_bytes, _suffix, _task_text: (
+        lambda _file_bytes, _suffix, _task_text, uploaded_file_name=None: (
             ExecutionResult(success=True),
             b"order_id,amount\n1,1500\n",
-            "snapscript_output.csv",
+            web.derive_output_file_name(uploaded_file_name, ".csv"),
         ),
     )
 
     web.main()
 
     assert fake_st.session_state["output_bytes"] == b"order_id,amount\n1,1500\n"
-    assert fake_st.session_state["output_file_name"] == "snapscript_output.csv"
+    assert fake_st.session_state["output_file_name"] == (
+        "orders_snapscript_output.csv"
+    )
+    assert fake_st.session_state["result_preview"] is not None
     assert fake_st.session_state["error_message"] is None
     assert ("success", ("Generation succeeded.",), {}) in fake_st.calls
 
@@ -206,7 +217,7 @@ def test_main_generate_failure_sets_error_without_output_bytes(
     monkeypatch.setattr(
         web,
         "run_uploaded_task",
-        lambda _file_bytes, _suffix, _task_text: (
+        lambda _file_bytes, _suffix, _task_text, uploaded_file_name=None: (
             ExecutionResult(
                 success=False,
                 stderr="Execution failed",
@@ -221,6 +232,7 @@ def test_main_generate_failure_sets_error_without_output_bytes(
 
     assert fake_st.session_state["output_bytes"] is None
     assert fake_st.session_state["output_file_name"] is None
+    assert fake_st.session_state["result_preview"] is None
     assert fake_st.session_state["error_message"] == "Execution failed"
     assert ("error", ("Execution failed",), {}) in fake_st.calls
 
@@ -239,7 +251,7 @@ def test_main_does_not_call_pipeline_without_generate_click(
     monkeypatch.setattr(
         web,
         "run_uploaded_task",
-        lambda file_bytes, suffix, task_text: calls.append(
+        lambda file_bytes, suffix, task_text, uploaded_file_name=None: calls.append(
             (file_bytes, suffix, task_text)
         ),
     )

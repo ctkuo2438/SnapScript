@@ -1,7 +1,9 @@
 import ast
+from io import BytesIO
 import re
 from pathlib import Path
 
+import pandas as pd
 import pytest
 
 from snapscript.interfaces import web
@@ -80,6 +82,12 @@ class FakeStreamlit:
 
     def success(self, *args: object, **kwargs: object) -> None:
         self.calls.append(("success", args, kwargs))
+
+    def dataframe(self, *args: object, **kwargs: object) -> None:
+        self.calls.append(("dataframe", args, kwargs))
+
+    def download_button(self, *args: object, **kwargs: object) -> None:
+        self.calls.append(("download_button", args, kwargs))
 
 
 def _button_disabled(
@@ -278,6 +286,58 @@ def test_write_upload_to_temp_input_uses_internal_filename(
     assert input_path.resolve().parent == tmp_path.resolve()
 
 
+@pytest.mark.parametrize(
+    ("uploaded_file_name", "suffix", "expected"),
+    [
+        ("orders.csv", ".csv", "orders_snapscript_output.csv"),
+        ("Orders.XLSX", ".xlsx", "Orders_snapscript_output.xlsx"),
+        ("../../secret.csv", ".csv", "secret_snapscript_output.csv"),
+        (None, ".csv", "snapscript_output.csv"),
+        ("...csv", ".csv", "snapscript_output.csv"),
+    ],
+)
+def test_derive_output_file_name_uses_safe_upload_stem(
+    uploaded_file_name: str | None,
+    suffix: str,
+    expected: str,
+) -> None:
+    assert web.derive_output_file_name(uploaded_file_name, suffix) == expected
+
+
+def test_load_output_preview_reads_csv_bytes() -> None:
+    preview = web.load_output_preview(b"order_id,amount\n1,1500\n", ".csv")
+
+    assert list(preview.columns) == ["order_id", "amount"]
+    assert preview.to_dict(orient="records") == [
+        {"order_id": 1, "amount": 1500}
+    ]
+
+
+def test_load_output_preview_limits_csv_rows() -> None:
+    rows = ["row_id"] + [str(index) for index in range(150)]
+    preview = web.load_output_preview(
+        "\n".join(rows).encode("utf-8"),
+        ".csv",
+    )
+
+    assert len(preview) == 100
+    assert preview["row_id"].iloc[-1] == 99
+
+
+def test_load_output_preview_reads_excel_bytes() -> None:
+    buffer = BytesIO()
+    pd.DataFrame({"order_id": [1], "amount": [1500]}).to_excel(
+        buffer,
+        index=False,
+    )
+
+    preview = web.load_output_preview(buffer.getvalue(), ".xlsx")
+
+    assert preview.to_dict(orient="records") == [
+        {"order_id": 1, "amount": 1500}
+    ]
+
+
 def test_path_like_upload_name_does_not_affect_temp_filename(
     tmp_path: Path,
 ) -> None:
@@ -312,6 +372,7 @@ def test_main_stores_valid_uploaded_file_without_pipeline_calls(
         ("Uploaded orders.csv (20 bytes).",),
         {},
     ) in fake_st.calls
+    assert not any(name == "download_button" for name, _args, _kwargs in fake_st.calls)
 
 
 def test_main_displays_invalid_upload_error_without_pipeline_calls(
@@ -399,7 +460,7 @@ def test_main_generate_click_validates_then_calls_pipeline_helper(
     monkeypatch.setattr(
         web,
         "run_uploaded_task",
-        lambda file_bytes, suffix, task_text: (
+        lambda file_bytes, suffix, task_text, uploaded_file_name=None: (
             calls.append((file_bytes, suffix, task_text))
             or (
                 web.ExecutionResult(success=True),
@@ -422,6 +483,83 @@ def test_main_generate_click_validates_then_calls_pipeline_helper(
         )
     ]
     assert not _has_placeholder_message(fake_st.calls)
+
+
+def test_main_success_stores_preview_and_renders_download(
+    monkeypatch,
+) -> None:
+    uploaded = FakeUploadedFile("orders.csv", b"order_id,total\n1,10\n")
+    output_bytes = b"order_id,total\n1,10\n"
+    fake_st = FakeStreamlit(
+        button_clicked=True,
+        uploaded_file=uploaded,
+        task_text="Keep rows.",
+    )
+    monkeypatch.setattr(web, "st", fake_st)
+    monkeypatch.setattr(
+        web,
+        "run_uploaded_task",
+        lambda _file_bytes, _suffix, _task_text, uploaded_file_name=None: (
+            web.ExecutionResult(success=True),
+            output_bytes,
+            web.derive_output_file_name(uploaded_file_name, ".csv"),
+        ),
+    )
+
+    web.main()
+
+    assert isinstance(fake_st.session_state["result_preview"], pd.DataFrame)
+    assert fake_st.session_state["output_bytes"] == output_bytes
+    assert fake_st.session_state["output_file_name"] == (
+        "orders_snapscript_output.csv"
+    )
+    assert any(name == "dataframe" for name, _args, _kwargs in fake_st.calls)
+    download_calls = [
+        kwargs for name, _args, kwargs in fake_st.calls if name == "download_button"
+    ]
+    assert download_calls == [
+        {
+            "label": "Download output",
+            "data": output_bytes,
+            "file_name": "orders_snapscript_output.csv",
+            "mime": "text/csv",
+        }
+    ]
+
+
+def test_main_failed_generate_clears_preview_and_hides_download(
+    monkeypatch,
+) -> None:
+    uploaded = FakeUploadedFile("orders.csv", b"order_id,total\n1,10\n")
+    fake_st = FakeStreamlit(
+        button_clicked=True,
+        uploaded_file=uploaded,
+        task_text="Keep rows.",
+    )
+    fake_st.session_state.update(
+        {
+            "result_preview": pd.DataFrame({"old": [1]}),
+            "output_bytes": b"old",
+            "output_file_name": "old.csv",
+        }
+    )
+    monkeypatch.setattr(web, "st", fake_st)
+    monkeypatch.setattr(
+        web,
+        "run_uploaded_task",
+        lambda _file_bytes, _suffix, _task_text, uploaded_file_name=None: (
+            web.ExecutionResult(success=False, stderr="Execution failed"),
+            None,
+            None,
+        ),
+    )
+
+    web.main()
+
+    assert fake_st.session_state["result_preview"] is None
+    assert fake_st.session_state["output_bytes"] is None
+    assert fake_st.session_state["output_file_name"] is None
+    assert not any(name == "download_button" for name, _args, _kwargs in fake_st.calls)
 
 
 def test_uploading_file_alone_does_not_show_generation_placeholder(

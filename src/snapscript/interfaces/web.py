@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 from collections.abc import MutableMapping
-from pathlib import Path
+from io import BytesIO
+from pathlib import Path, PureWindowsPath
+import re
 import tempfile
 
+import pandas as pd
 import streamlit as st
 
 from snapscript.core import prompt_builder, retry_handler, schema_inspector
@@ -13,6 +16,12 @@ from snapscript.core.models import ExecutionResult
 MAX_RUNS_PER_SESSION = 10
 ALLOWED_UPLOAD_SUFFIXES = {".csv", ".xlsx", ".xls"}
 MAX_UPLOAD_BYTES = 10 * 1024 * 1024
+PREVIEW_MAX_ROWS = 100
+DOWNLOAD_MIME_TYPES = {
+    ".csv": "text/csv",
+    ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    ".xls": "application/vnd.ms-excel",
+}
 
 SESSION_DEFAULTS: dict[str, object] = {
     "uploaded_file_name": None,
@@ -128,10 +137,49 @@ def write_upload_to_temp_input(
     return input_path
 
 
+def derive_output_file_name(
+    uploaded_file_name: str | None,
+    suffix: str,
+) -> str:
+    normalized_suffix = validate_upload_suffix(f"output{suffix}")
+    fallback = f"snapscript_output{normalized_suffix}"
+    if not uploaded_file_name:
+        return fallback
+
+    posix_name = Path(uploaded_file_name).name
+    safe_name = PureWindowsPath(posix_name).name
+    stem = PureWindowsPath(safe_name).stem
+    safe_stem = re.sub(r"[^A-Za-z0-9._-]+", "_", stem).strip("._-")
+    if not safe_stem:
+        return fallback
+    return f"{safe_stem}_snapscript_output{normalized_suffix}"
+
+
+def load_output_preview(
+    output_bytes: bytes,
+    suffix: str,
+    max_rows: int = PREVIEW_MAX_ROWS,
+) -> pd.DataFrame:
+    normalized_suffix = validate_upload_suffix(f"output{suffix}")
+    buffer = BytesIO(output_bytes)
+    try:
+        if normalized_suffix == ".csv":
+            return pd.read_csv(buffer, nrows=max_rows)
+        return pd.read_excel(buffer, nrows=max_rows)
+    except Exception as exc:
+        raise ValueError("Could not read output preview.") from exc
+
+
+def download_mime_type(suffix: str) -> str:
+    normalized_suffix = validate_upload_suffix(f"output{suffix}")
+    return DOWNLOAD_MIME_TYPES[normalized_suffix]
+
+
 def run_uploaded_task(
     uploaded_file_bytes: bytes,
     upload_suffix: str,
     task_text: str,
+    uploaded_file_name: str | None = None,
 ) -> tuple[ExecutionResult, bytes | None, str | None]:
     normalized_suffix = validate_upload_suffix(f"input{upload_suffix}")
     normalized_task = validate_task_text(task_text)
@@ -155,7 +203,7 @@ def run_uploaded_task(
         return (
             result,
             output_path.read_bytes(),
-            f"snapscript_output{normalized_suffix}",
+            derive_output_file_name(uploaded_file_name, normalized_suffix),
         )
 
 
@@ -207,23 +255,43 @@ def main() -> None:
             st.session_state["error_message"] = validation_error
         else:
             st.session_state["error_message"] = None
+            st.session_state["result_preview"] = None
             st.session_state["output_bytes"] = None
             st.session_state["output_file_name"] = None
             try:
+                uploaded_file_name = st.session_state["uploaded_file_name"]
+                display_file_name = (
+                    str(uploaded_file_name)
+                    if uploaded_file_name is not None
+                    else None
+                )
                 result, output_bytes, output_file_name = run_uploaded_task(
                     bytes(st.session_state["uploaded_file_bytes"]),
                     str(st.session_state["uploaded_file_suffix"]),
                     str(st.session_state["task_text"]),
+                    uploaded_file_name=display_file_name,
                 )
+                if result.success and output_bytes is not None:
+                    result_preview = load_output_preview(
+                        output_bytes,
+                        str(st.session_state["uploaded_file_suffix"]),
+                    )
             except Exception as exc:
                 st.session_state["error_message"] = (
                     f"{type(exc).__name__}: {exc}"
                 )
             else:
                 if result.success:
-                    st.session_state["output_bytes"] = output_bytes
-                    st.session_state["output_file_name"] = output_file_name
-                    st.success("Generation succeeded.")
+                    if output_bytes is None or output_file_name is None:
+                        st.session_state["error_message"] = (
+                            "Output file was not available."
+                        )
+                        st.error(str(st.session_state["error_message"]))
+                    else:
+                        st.session_state["result_preview"] = result_preview
+                        st.session_state["output_bytes"] = output_bytes
+                        st.session_state["output_file_name"] = output_file_name
+                        st.success("Generation succeeded.")
                 else:
                     st.session_state["error_message"] = format_execution_error(
                         result
@@ -231,7 +299,22 @@ def main() -> None:
                     st.error(str(st.session_state["error_message"]))
 
     st.subheader("Output")
-    st.info("Output preview will appear here after generation is wired.")
+    result_preview = st.session_state["result_preview"]
+    if result_preview is not None:
+        st.caption(f"Showing up to {PREVIEW_MAX_ROWS} preview rows.")
+        st.dataframe(result_preview)
+    else:
+        st.info("Output preview will appear here after a successful run.")
+
+    output_bytes = st.session_state["output_bytes"]
+    output_file_name = st.session_state["output_file_name"]
+    if output_bytes is not None and output_file_name is not None:
+        st.download_button(
+            label="Download output",
+            data=output_bytes,
+            file_name=str(output_file_name),
+            mime=download_mime_type(Path(str(output_file_name)).suffix),
+        )
 
     st.subheader("Errors")
     error_message = st.session_state["error_message"]
