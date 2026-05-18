@@ -46,6 +46,48 @@ def initialize_session_state(
         target.setdefault(key, default)
 
 
+def clear_output_state(state: MutableMapping[str, object]) -> None:
+    state["result_preview"] = None
+    state["output_bytes"] = None
+    state["output_file_name"] = None
+
+
+def begin_accepted_run(state: MutableMapping[str, object]) -> None:
+    state["error_message"] = None
+    clear_output_state(state)
+    state["is_running"] = True
+
+
+def mark_run_success(
+    state: MutableMapping[str, object],
+    preview: pd.DataFrame,
+    output_bytes: bytes,
+    output_file_name: str,
+) -> None:
+    state["result_preview"] = preview
+    state["output_bytes"] = output_bytes
+    state["output_file_name"] = output_file_name
+    state["error_message"] = None
+    state["is_running"] = False
+
+
+def mark_run_failure(
+    state: MutableMapping[str, object],
+    error_message: str,
+) -> None:
+    clear_output_state(state)
+    state["error_message"] = error_message
+    state["is_running"] = False
+
+
+def mark_validation_error(
+    state: MutableMapping[str, object],
+    error_message: str,
+) -> None:
+    state["error_message"] = error_message
+    state["is_running"] = False
+
+
 def get_remaining_runs(
     run_count: int,
     max_runs: int = MAX_RUNS_PER_SESSION,
@@ -252,12 +294,12 @@ def main() -> None:
     if st.button("Generate", disabled=not can_run):
         can_run, validation_error = can_generate(st.session_state)
         if not can_run:
-            st.session_state["error_message"] = validation_error
+            mark_validation_error(
+                st.session_state,
+                validation_error or "Cannot generate.",
+            )
         else:
-            st.session_state["error_message"] = None
-            st.session_state["result_preview"] = None
-            st.session_state["output_bytes"] = None
-            st.session_state["output_file_name"] = None
+            begin_accepted_run(st.session_state)
             try:
                 uploaded_file_name = st.session_state["uploaded_file_name"]
                 display_file_name = (
@@ -277,24 +319,30 @@ def main() -> None:
                         str(st.session_state["uploaded_file_suffix"]),
                     )
             except Exception as exc:
-                st.session_state["error_message"] = (
-                    f"{type(exc).__name__}: {exc}"
+                mark_run_failure(
+                    st.session_state,
+                    f"{type(exc).__name__}: {exc}",
                 )
             else:
                 if result.success:
                     if output_bytes is None or output_file_name is None:
-                        st.session_state["error_message"] = (
-                            "Output file was not available."
+                        mark_run_failure(
+                            st.session_state,
+                            "Output file was not available.",
                         )
                         st.error(str(st.session_state["error_message"]))
                     else:
-                        st.session_state["result_preview"] = result_preview
-                        st.session_state["output_bytes"] = output_bytes
-                        st.session_state["output_file_name"] = output_file_name
+                        mark_run_success(
+                            st.session_state,
+                            result_preview,
+                            output_bytes,
+                            output_file_name,
+                        )
                         st.success("Generation succeeded.")
                 else:
-                    st.session_state["error_message"] = format_execution_error(
-                        result
+                    mark_run_failure(
+                        st.session_state,
+                        format_execution_error(result),
                     )
                     st.error(str(st.session_state["error_message"]))
 

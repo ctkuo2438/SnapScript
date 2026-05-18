@@ -133,6 +133,123 @@ def test_initialize_session_state_sets_expected_defaults() -> None:
             assert state[key] == expected
 
 
+def test_session_defaults_exactly_match_phase_2_plan_keys() -> None:
+    assert set(web.SESSION_DEFAULTS) == set(EXPECTED_SESSION_DEFAULTS)
+
+
+def test_clear_output_state_only_clears_output_fields() -> None:
+    state: dict[str, object] = {
+        "uploaded_file_name": "orders.csv",
+        "uploaded_file_bytes": b"input",
+        "uploaded_file_suffix": ".csv",
+        "task_text": "Keep rows.",
+        "result_preview": pd.DataFrame({"old": [1]}),
+        "output_bytes": b"old",
+        "output_file_name": "old.csv",
+        "error_message": "old error",
+        "run_count": 4,
+        "last_run_timestamp": 123.0,
+        "is_running": True,
+    }
+
+    web.clear_output_state(state)
+
+    assert state["result_preview"] is None
+    assert state["output_bytes"] is None
+    assert state["output_file_name"] is None
+    assert state["uploaded_file_name"] == "orders.csv"
+    assert state["uploaded_file_bytes"] == b"input"
+    assert state["uploaded_file_suffix"] == ".csv"
+    assert state["task_text"] == "Keep rows."
+    assert state["error_message"] == "old error"
+    assert state["run_count"] == 4
+    assert state["last_run_timestamp"] == 123.0
+    assert state["is_running"] is True
+
+
+def test_begin_accepted_run_clears_error_and_output_state() -> None:
+    state: dict[str, object] = {
+        "result_preview": pd.DataFrame({"old": [1]}),
+        "output_bytes": b"old",
+        "output_file_name": "old.csv",
+        "error_message": "old error",
+        "run_count": 2,
+        "last_run_timestamp": 123.0,
+        "is_running": False,
+    }
+
+    web.begin_accepted_run(state)
+
+    assert state["result_preview"] is None
+    assert state["output_bytes"] is None
+    assert state["output_file_name"] is None
+    assert state["error_message"] is None
+    assert state["is_running"] is True
+    assert state["run_count"] == 2
+    assert state["last_run_timestamp"] == 123.0
+
+
+def test_mark_run_success_stores_output_and_clears_error() -> None:
+    preview = pd.DataFrame({"order_id": [1]})
+    state: dict[str, object] = {
+        "result_preview": None,
+        "output_bytes": None,
+        "output_file_name": None,
+        "error_message": "old error",
+        "is_running": True,
+    }
+
+    web.mark_run_success(
+        state,
+        preview,
+        b"order_id\n1\n",
+        "orders_snapscript_output.csv",
+    )
+
+    assert state["result_preview"] is preview
+    assert state["output_bytes"] == b"order_id\n1\n"
+    assert state["output_file_name"] == "orders_snapscript_output.csv"
+    assert state["error_message"] is None
+    assert state["is_running"] is False
+
+
+def test_mark_run_failure_clears_stale_output_and_stores_error() -> None:
+    state: dict[str, object] = {
+        "result_preview": pd.DataFrame({"old": [1]}),
+        "output_bytes": b"old",
+        "output_file_name": "old.csv",
+        "error_message": None,
+        "is_running": True,
+    }
+
+    web.mark_run_failure(state, "Execution failed")
+
+    assert state["result_preview"] is None
+    assert state["output_bytes"] is None
+    assert state["output_file_name"] is None
+    assert state["error_message"] == "Execution failed"
+    assert state["is_running"] is False
+
+
+def test_mark_validation_error_preserves_existing_output() -> None:
+    preview = pd.DataFrame({"old": [1]})
+    state: dict[str, object] = {
+        "result_preview": preview,
+        "output_bytes": b"old",
+        "output_file_name": "old.csv",
+        "error_message": None,
+        "is_running": True,
+    }
+
+    web.mark_validation_error(state, "Task description is required.")
+
+    assert state["result_preview"] is preview
+    assert state["output_bytes"] == b"old"
+    assert state["output_file_name"] == "old.csv"
+    assert state["error_message"] == "Task description is required."
+    assert state["is_running"] is False
+
+
 def test_get_remaining_runs_never_returns_negative() -> None:
     assert web.get_remaining_runs(0) == 10
     assert web.get_remaining_runs(7) == 3
@@ -495,6 +612,7 @@ def test_main_success_stores_preview_and_renders_download(
         uploaded_file=uploaded,
         task_text="Keep rows.",
     )
+    fake_st.session_state["error_message"] = "old error"
     monkeypatch.setattr(web, "st", fake_st)
     monkeypatch.setattr(
         web,
@@ -513,6 +631,8 @@ def test_main_success_stores_preview_and_renders_download(
     assert fake_st.session_state["output_file_name"] == (
         "orders_snapscript_output.csv"
     )
+    assert fake_st.session_state["error_message"] is None
+    assert fake_st.session_state["is_running"] is False
     assert any(name == "dataframe" for name, _args, _kwargs in fake_st.calls)
     download_calls = [
         kwargs for name, _args, kwargs in fake_st.calls if name == "download_button"
@@ -567,23 +687,43 @@ def test_uploading_file_alone_does_not_show_generation_placeholder(
 ) -> None:
     uploaded = FakeUploadedFile("orders.csv", b"order_id,total\n1,10\n")
     fake_st = FakeStreamlit(uploaded_file=uploaded)
+    fake_st.session_state.update(
+        {
+            "result_preview": pd.DataFrame({"old": [1]}),
+            "output_bytes": b"old",
+            "output_file_name": "old.csv",
+        }
+    )
     monkeypatch.setattr(web, "st", fake_st)
 
     web.main()
 
     assert not _has_placeholder_message(fake_st.calls)
+    assert isinstance(fake_st.session_state["result_preview"], pd.DataFrame)
+    assert fake_st.session_state["output_bytes"] == b"old"
+    assert fake_st.session_state["output_file_name"] == "old.csv"
 
 
 def test_editing_task_text_alone_does_not_show_generation_placeholder(
     monkeypatch,
 ) -> None:
     fake_st = FakeStreamlit(task_text="Keep large orders.")
+    fake_st.session_state.update(
+        {
+            "result_preview": pd.DataFrame({"old": [1]}),
+            "output_bytes": b"old",
+            "output_file_name": "old.csv",
+        }
+    )
     monkeypatch.setattr(web, "st", fake_st)
 
     web.main()
 
     assert fake_st.session_state["task_text"] == "Keep large orders."
     assert not _has_placeholder_message(fake_st.calls)
+    assert isinstance(fake_st.session_state["result_preview"], pd.DataFrame)
+    assert fake_st.session_state["output_bytes"] == b"old"
+    assert fake_st.session_state["output_file_name"] == "old.csv"
 
 
 def test_main_renders_phase_2_skeleton_without_pipeline_calls(
