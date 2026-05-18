@@ -2,8 +2,12 @@ from __future__ import annotations
 
 from collections.abc import MutableMapping
 from pathlib import Path
+import tempfile
 
 import streamlit as st
+
+from snapscript.core import prompt_builder, retry_handler, schema_inspector
+from snapscript.core.models import ExecutionResult
 
 
 MAX_RUNS_PER_SESSION = 10
@@ -124,6 +128,44 @@ def write_upload_to_temp_input(
     return input_path
 
 
+def run_uploaded_task(
+    uploaded_file_bytes: bytes,
+    upload_suffix: str,
+    task_text: str,
+) -> tuple[ExecutionResult, bytes | None, str | None]:
+    normalized_suffix = validate_upload_suffix(f"input{upload_suffix}")
+    normalized_task = validate_task_text(task_text)
+
+    with tempfile.TemporaryDirectory(prefix="snapscript_web_") as temp_name:
+        temp_dir = Path(temp_name).resolve()
+        input_path = write_upload_to_temp_input(
+            temp_dir,
+            uploaded_file_bytes,
+            normalized_suffix,
+        )
+        output_path = temp_dir / f"output{normalized_suffix}"
+
+        schema = schema_inspector.inspect(input_path)
+        prompt = prompt_builder.build(normalized_task, schema)
+        result = retry_handler.run(prompt, input_path, output_path)
+
+        if not result.success:
+            return result, None, None
+
+        return (
+            result,
+            output_path.read_bytes(),
+            f"snapscript_output{normalized_suffix}",
+        )
+
+
+def format_execution_error(result: ExecutionResult) -> str:
+    message = result.stderr.strip()
+    if message:
+        return message
+    return "Execution failed."
+
+
 def main() -> None:
     initialize_session_state()
 
@@ -165,7 +207,28 @@ def main() -> None:
             st.session_state["error_message"] = validation_error
         else:
             st.session_state["error_message"] = None
-            st.info("Generation is not wired yet. This is the Phase 2 skeleton.")
+            st.session_state["output_bytes"] = None
+            st.session_state["output_file_name"] = None
+            try:
+                result, output_bytes, output_file_name = run_uploaded_task(
+                    bytes(st.session_state["uploaded_file_bytes"]),
+                    str(st.session_state["uploaded_file_suffix"]),
+                    str(st.session_state["task_text"]),
+                )
+            except Exception as exc:
+                st.session_state["error_message"] = (
+                    f"{type(exc).__name__}: {exc}"
+                )
+            else:
+                if result.success:
+                    st.session_state["output_bytes"] = output_bytes
+                    st.session_state["output_file_name"] = output_file_name
+                    st.success("Generation succeeded.")
+                else:
+                    st.session_state["error_message"] = format_execution_error(
+                        result
+                    )
+                    st.error(str(st.session_state["error_message"]))
 
     st.subheader("Output")
     st.info("Output preview will appear here after generation is wired.")

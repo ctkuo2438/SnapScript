@@ -385,7 +385,7 @@ def test_main_disables_generate_when_run_limit_reached(
     assert _button_disabled(fake_st.calls) is True
 
 
-def test_main_generate_click_validates_then_shows_placeholder(
+def test_main_generate_click_validates_then_calls_pipeline_helper(
     monkeypatch,
 ) -> None:
     uploaded = FakeUploadedFile("orders.csv", b"order_id,total\n1,10\n")
@@ -394,14 +394,34 @@ def test_main_generate_click_validates_then_shows_placeholder(
         uploaded_file=uploaded,
         task_text=" Keep large orders. ",
     )
+    calls: list[tuple[bytes, str, str]] = []
     monkeypatch.setattr(web, "st", fake_st)
+    monkeypatch.setattr(
+        web,
+        "run_uploaded_task",
+        lambda file_bytes, suffix, task_text: (
+            calls.append((file_bytes, suffix, task_text))
+            or (
+                web.ExecutionResult(success=True),
+                b"ok\n",
+                "snapscript_output.csv",
+            )
+        ),
+    )
 
     web.main()
 
     assert _button_disabled(fake_st.calls) is False
     assert fake_st.session_state["task_text"] == " Keep large orders. "
     assert fake_st.session_state["error_message"] is None
-    assert _has_placeholder_message(fake_st.calls)
+    assert calls == [
+        (
+            b"order_id,total\n1,10\n",
+            ".csv",
+            " Keep large orders. ",
+        )
+    ]
+    assert not _has_placeholder_message(fake_st.calls)
 
 
 def test_uploading_file_alone_does_not_show_generation_placeholder(
@@ -445,12 +465,14 @@ def test_main_renders_phase_2_skeleton_without_pipeline_calls(
     assert not _has_placeholder_message(fake_st.calls)
 
 
-def test_web_imports_streamlit_but_not_provider_or_execution_pipeline() -> None:
+def test_web_imports_streamlit_and_retry_but_not_provider_or_sandbox() -> None:
     source = Path("src/snapscript/interfaces/web.py").read_text(encoding="utf-8")
 
     assert "import streamlit as st" in source
+    assert "retry_handler.run(" in source
+    assert "Anthropic" not in source
+    assert "anthropic" not in source
     assert "code_generator" not in source
-    assert "retry_handler" not in source
     assert "safety_checker" not in source
     assert "sandbox_executor" not in source
     assert ".generate(" not in source
