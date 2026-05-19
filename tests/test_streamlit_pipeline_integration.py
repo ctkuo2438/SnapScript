@@ -233,8 +233,9 @@ def test_main_generate_failure_sets_error_without_output_bytes(
     assert fake_st.session_state["output_bytes"] is None
     assert fake_st.session_state["output_file_name"] is None
     assert fake_st.session_state["result_preview"] is None
-    assert fake_st.session_state["error_message"] == "Execution failed"
-    assert ("error", ("Execution failed",), {}) in fake_st.calls
+    expected_error = "Execution failed in the sandbox. Summary: Execution failed"
+    assert fake_st.session_state["error_message"] == expected_error
+    assert ("error", (expected_error,), {}) in fake_st.calls
 
 
 def test_main_does_not_call_pipeline_without_generate_click(

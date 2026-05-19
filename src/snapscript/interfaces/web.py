@@ -19,6 +19,13 @@ COOLDOWN_SECONDS = 5
 ALLOWED_UPLOAD_SUFFIXES = {".csv", ".xlsx", ".xls"}
 MAX_UPLOAD_BYTES = 10 * 1024 * 1024
 PREVIEW_MAX_ROWS = 100
+ERROR_MAX_CHARS = 2000
+GENERIC_ERROR_MESSAGE = "Something went wrong."
+PROVIDER_ERROR_MESSAGE = (
+    "Provider call failed. Check your API key or provider configuration."
+)
+SAFETY_ERROR_MESSAGE = "Generated code was rejected by the safety checker."
+SANDBOX_ERROR_MESSAGE = "Execution failed in the sandbox."
 DOWNLOAD_MIME_TYPES = {
     ".csv": "text/csv",
     ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -120,6 +127,141 @@ def check_rate_limit(
             return False, f"Please wait {remaining:.1f}s before running again."
 
     return True, None
+
+
+def redact_error_text(message: str) -> str:
+    redacted = re.sub(
+        r"\b(?P<name>[A-Z0-9_]*(?:API[_-]?KEY|TOKEN|PASSWORD|SECRET))"
+        r"\s*=\s*['\"]?[^\s'\",;]+['\"]?",
+        lambda match: f"{match.group('name')}=[REDACTED]",
+        message,
+        flags=re.IGNORECASE,
+    )
+    redacted = re.sub(
+        r"\b(?P<name>api[_-]?key|token|password|secret)"
+        r"\s*=\s*['\"]?[^\s'\",;]+['\"]?",
+        lambda match: f"{match.group('name')}=[REDACTED]",
+        redacted,
+        flags=re.IGNORECASE,
+    )
+    redacted = re.sub(
+        r"\bBearer\s+sk-[A-Za-z0-9._-]+",
+        "Bearer [REDACTED]",
+        redacted,
+        flags=re.IGNORECASE,
+    )
+    redacted = re.sub(
+        r"\bsk-ant-[A-Za-z0-9._-]+",
+        "[REDACTED]",
+        redacted,
+    )
+    redacted = re.sub(
+        r"\bsk-[A-Za-z0-9][A-Za-z0-9._-]{8,}",
+        "[REDACTED]",
+        redacted,
+    )
+    return redacted
+
+
+def truncate_error_text(
+    message: str,
+    max_chars: int = ERROR_MAX_CHARS,
+) -> str:
+    if len(message) <= max_chars:
+        return message
+    return f"{message[:max_chars]}... [truncated]"
+
+
+def _strip_traceback_noise(message: str) -> str:
+    lines = message.splitlines()
+    if not any(line.strip().startswith("Traceback") for line in lines):
+        return message.strip()
+
+    useful_lines: list[str] = []
+    for line in lines:
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if stripped.startswith("Traceback"):
+            continue
+        if stripped.startswith("File "):
+            continue
+        if stripped.startswith("^"):
+            continue
+        if stripped.startswith("During handling"):
+            continue
+        if stripped.startswith("The above exception"):
+            continue
+        useful_lines.append(stripped)
+
+    return useful_lines[-1] if useful_lines else GENERIC_ERROR_MESSAGE
+
+
+def _redact_internal_paths(message: str) -> str:
+    return re.sub(
+        r"(?:(?:/private)?/tmp|/var/folders)/[^\s'\",;:]+",
+        "[path]",
+        message,
+    )
+
+
+def format_user_error(
+    message: str | None,
+    max_chars: int | None = None,
+) -> str:
+    text = "" if message is None else str(message).strip()
+    if not text:
+        return GENERIC_ERROR_MESSAGE
+
+    text = _strip_traceback_noise(text)
+    text = redact_error_text(text)
+    text = _redact_internal_paths(text)
+    if not text.strip():
+        text = GENERIC_ERROR_MESSAGE
+    limit = ERROR_MAX_CHARS if max_chars is None else max_chars
+    return truncate_error_text(text, limit)
+
+
+def _is_provider_error(message: str) -> bool:
+    lower = message.lower()
+    provider_indicators = (
+        "providercallerror",
+        "provider call failed",
+        "api_key",
+        "api key",
+        "authentication",
+        "unauthorized",
+        "forbidden",
+        "401",
+        "403",
+    )
+    return any(indicator in lower for indicator in provider_indicators)
+
+
+def _is_safety_error(message: str) -> bool:
+    lower = message.lower()
+    return "safety" in lower or "unsafe" in lower
+
+
+def _format_pipeline_error(
+    message: str | None,
+    exit_code: int | None = None,
+    default_to_sandbox: bool = False,
+) -> str:
+    raw_message = "" if message is None else str(message)
+    if _is_provider_error(raw_message):
+        return PROVIDER_ERROR_MESSAGE
+    if _is_safety_error(raw_message):
+        return SAFETY_ERROR_MESSAGE
+
+    safe_summary = format_user_error(raw_message)
+    if default_to_sandbox and safe_summary != GENERIC_ERROR_MESSAGE:
+        return format_user_error(
+            f"{SANDBOX_ERROR_MESSAGE} Summary: {safe_summary}"
+        )
+    if default_to_sandbox or exit_code:
+        return SANDBOX_ERROR_MESSAGE
+    return safe_summary
 
 
 def normalize_task_text(task_text: str) -> str:
@@ -277,10 +419,21 @@ def run_uploaded_task(
 
 
 def format_execution_error(result: ExecutionResult) -> str:
-    message = result.stderr.strip()
-    if message:
-        return message
-    return "Execution failed."
+    message = result.stderr.strip() or result.stdout.strip()
+    if not message:
+        return "Execution failed."
+    return _format_pipeline_error(
+        message,
+        exit_code=result.exit_code,
+        default_to_sandbox=True,
+    )
+
+
+def format_exception_error(exc: Exception) -> str:
+    return _format_pipeline_error(
+        f"{type(exc).__name__}: {exc}",
+        default_to_sandbox=False,
+    )
 
 
 def main() -> None:
@@ -373,7 +526,7 @@ def main() -> None:
                 except Exception as exc:
                     mark_run_failure(
                         st.session_state,
-                        f"{type(exc).__name__}: {exc}",
+                        format_exception_error(exc),
                     )
                 else:
                     if result.success:
