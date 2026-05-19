@@ -200,7 +200,7 @@ def check_rate_limit(
 
 ## 11. Implementation Tasks
 
-**Tracking status (updated 2026-05-19):** Tasks 21 through 30 are complete.
+**Tracking status (updated 2026-05-19):** Tasks 21 through 31 are complete. Task 31 is a post-MVP follow-up and is not required for initial MVP completion.
 
 | Task | Status |
 |------|--------|
@@ -214,6 +214,7 @@ def check_rate_limit(
 | Task 28: Error Display And Recovery UX | Complete |
 | Task 29: Streamlit Tests / Manual Verification Checklist | Complete |
 | Task 30: Gate - Phase 2 MVP Complete | Complete |
+| Task 31: LLM Call Audit Logging | Complete |
 
 Task 30 gate results on 2026-05-19:
 
@@ -501,6 +502,88 @@ Manual gate checklist:
 - Download output and open it.
 - Click Generate again immediately and confirm cooldown error.
 - Confirm remaining runs decreases only for accepted runs.
+
+### Task 31: LLM Call Audit Logging
+
+**Goal:** Record safe local metadata for each accepted Generate run so developers can confirm provider usage and debug failures without storing secrets or raw user data.
+
+**Post-MVP note:** This task is after the Phase 2 MVP gate and is not required for initial MVP completion.
+
+**Recommended approach:**
+- Start with append-only JSONL audit logs, not MLflow.
+- Proposed local path: `logs/snapscript_audit.jsonl`, or another local `logs/` path.
+- Ensure `logs/` is gitignored if it is not already.
+- Prefer an interface-agnostic helper such as `src/snapscript/core/audit_logger.py` if it does not introduce UI dependencies.
+- Streamlit may call the helper, but core must not import Streamlit.
+- Audit logging must not bypass `retry_handler.run(...)`.
+- Audit logging must not change execution behavior.
+- Audit logging failure should not fail the user's transformation by default; it should be best-effort unless explicitly configured otherwise.
+- MLflow may be reconsidered later only if experiment tracking becomes necessary.
+
+**Files likely touched:**
+- Create: `src/snapscript/core/audit_logger.py` or another interface-agnostic helper.
+- Modify: `src/snapscript/interfaces/web.py`.
+- Modify/Create: `tests/test_audit_logger.py`.
+- Modify: `tests/test_streamlit_app.py` or `tests/test_streamlit_pipeline_integration.py`.
+- Modify: `.gitignore` if `logs/` is not already ignored.
+
+**Dependencies:** Task 30.
+
+**Default audit event metadata:**
+- `timestamp`
+- `run_id`
+- `interface = "streamlit"`
+- `provider`
+- `model`
+- `success` or `failure`
+- `duration_ms`
+- input filename, file size, and SHA-256 hash
+- task text SHA-256 hash
+- schema summary SHA-256 hash
+- prompt SHA-256 hash
+- generated code SHA-256 hash, if available from the existing pipeline
+- output filename, file size, and SHA-256 hash
+- error category, if failed
+- retry count or attempt count, if available
+- whether a provider call happened
+
+**Privacy and security rules:**
+- Never log API keys, environment variables, `.env` contents, secrets, full uploaded CSV contents, full raw dataset rows, or full tracebacks by default.
+- Store metadata and hashes by default, not raw sensitive content.
+- Redact API-key-like and secret-like values before writing audit records.
+- Optional local debug mode may use an explicit opt-in env var such as `SNAPSCRIPT_AUDIT_INCLUDE_PROMPTS=1`.
+- Only explicit debug mode may include full task text, full system/user prompt, or generated code.
+- Even in debug mode, never log API keys or full uploaded CSV contents, and still redact secrets.
+- Logs must remain local and gitignored.
+
+**Acceptance criteria:**
+- Accepted Streamlit Generate runs write one audit event.
+- Audit event records provider/model, timestamp, run ID, interface, duration, success/failure, and safe hashes.
+- Audit event can indicate whether a provider call happened.
+- Audit event records input/output metadata and SHA-256 hashes, not raw file contents.
+- API keys and secret-like values are redacted.
+- Full prompt, task text, and generated code are not logged by default.
+- Optional debug env var can include prompt/task/code for local-only debugging.
+- Full uploaded CSV contents are never logged by default.
+- Failed provider, safety, and sandbox runs record a safe error category.
+- Audit logging failure does not break successful transformations.
+- Normal pytest still does not call a real provider.
+
+**Suggested verification commands:**
+```bash
+uv run pytest tests/test_audit_logger.py tests/test_streamlit_app.py tests/test_streamlit_pipeline_integration.py
+env -u ANTHROPIC_API_KEY uv run pytest
+uv run pytest
+```
+
+**Non-goals:**
+- Do not add MLflow yet.
+- Do not add a database.
+- Do not add cloud logging.
+- Do not add user accounts or persistent multi-user history.
+- Do not log raw uploaded datasets.
+- Do not log secrets.
+- Do not make audit logging a replacement for `safety_checker` or `sandbox_executor`.
 
 ## 12. Acceptance Criteria
 

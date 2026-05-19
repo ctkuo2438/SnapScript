@@ -1,5 +1,7 @@
 from pathlib import Path
 
+import pytest
+
 from snapscript.core.models import (
     ExecutionResult,
     PromptPayload,
@@ -74,6 +76,11 @@ class FakeStreamlit:
         self.calls.append(("download_button", args, kwargs))
 
 
+@pytest.fixture(autouse=True)
+def isolate_audit_log(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(web, "AUDIT_LOG_PATH", tmp_path / "audit.jsonl")
+
+
 def _schema() -> SchemaReport:
     return SchemaReport(
         filename="input.csv",
@@ -135,6 +142,55 @@ def test_run_uploaded_task_calls_existing_core_flow_with_temp_paths(
     assert [name for name, _value in calls] == ["inspect", "build", "run"]
 
 
+def test_run_uploaded_task_populates_audit_metadata_without_raw_rows(
+    monkeypatch,
+) -> None:
+    upload_bytes = b"order_id,amount\n1,1500\n"
+    output_bytes = b"order_id,amount\n1,1500\n"
+    audit_metadata: dict[str, object] = {}
+
+    def fake_inspect(_input_path: Path) -> SchemaReport:
+        schema = _schema()
+        schema.columns = []
+        schema.sample_rows = [{"order_id": 1, "amount": 1500}]
+        return schema
+
+    def fake_build(_task_text: str, _schema_report: SchemaReport) -> PromptPayload:
+        return PromptPayload(system_prompt="system", user_prompt="user")
+
+    def fake_run(
+        _prompt: PromptPayload,
+        _input_path: Path,
+        output_path: Path,
+    ) -> ExecutionResult:
+        assert audit_metadata["provider_called"] is True
+        output_path.write_bytes(output_bytes)
+        return ExecutionResult(success=True, output_files=[output_path])
+
+    monkeypatch.setattr(web.schema_inspector, "inspect", fake_inspect)
+    monkeypatch.setattr(web.prompt_builder, "build", fake_build)
+    monkeypatch.setattr(web.retry_handler, "run", fake_run)
+
+    result, returned_output, output_file_name = web.run_uploaded_task(
+        upload_bytes,
+        ".csv",
+        "Keep large orders.",
+        uploaded_file_name="orders.csv",
+        audit_metadata=audit_metadata,
+    )
+
+    assert result.success is True
+    assert returned_output == output_bytes
+    assert output_file_name == "orders_snapscript_output.csv"
+    assert audit_metadata["prompt_text"] == "system\n\nuser"
+    assert audit_metadata["system_prompt"] == "system"
+    assert audit_metadata["user_prompt"] == "user"
+    schema_summary = audit_metadata["schema_summary"]
+    assert isinstance(schema_summary, dict)
+    assert "sample_rows" not in schema_summary
+    assert "1500" not in str(schema_summary)
+
+
 def test_run_uploaded_task_does_not_store_output_bytes_on_failure(
     monkeypatch,
 ) -> None:
@@ -186,7 +242,7 @@ def test_main_generate_click_stores_output_bytes_after_success(
     monkeypatch.setattr(
         web,
         "run_uploaded_task",
-        lambda _file_bytes, _suffix, _task_text, uploaded_file_name=None: (
+        lambda _file_bytes, _suffix, _task_text, uploaded_file_name=None, audit_metadata=None: (
             ExecutionResult(success=True),
             b"order_id,amount\n1,1500\n",
             web.derive_output_file_name(uploaded_file_name, ".csv"),
@@ -217,7 +273,7 @@ def test_main_generate_failure_sets_error_without_output_bytes(
     monkeypatch.setattr(
         web,
         "run_uploaded_task",
-        lambda _file_bytes, _suffix, _task_text, uploaded_file_name=None: (
+        lambda _file_bytes, _suffix, _task_text, uploaded_file_name=None, audit_metadata=None: (
             ExecutionResult(
                 success=False,
                 stderr="Execution failed",
@@ -252,7 +308,7 @@ def test_main_does_not_call_pipeline_without_generate_click(
     monkeypatch.setattr(
         web,
         "run_uploaded_task",
-        lambda file_bytes, suffix, task_text, uploaded_file_name=None: calls.append(
+        lambda file_bytes, suffix, task_text, uploaded_file_name=None, audit_metadata=None: calls.append(
             (file_bytes, suffix, task_text)
         ),
     )

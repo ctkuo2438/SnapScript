@@ -6,12 +6,14 @@ from pathlib import Path, PureWindowsPath
 import re
 import tempfile
 import time
+import uuid
 
 import pandas as pd
 import streamlit as st
 
-from snapscript.core import prompt_builder, retry_handler, schema_inspector
-from snapscript.core.models import ExecutionResult
+from snapscript.config import AppConfig
+from snapscript.core import audit_logger, prompt_builder, retry_handler, schema_inspector
+from snapscript.core.models import ExecutionResult, PromptPayload, SchemaReport
 
 
 MAX_RUNS_PER_SESSION = 10
@@ -26,6 +28,8 @@ PROVIDER_ERROR_MESSAGE = (
 )
 SAFETY_ERROR_MESSAGE = "Generated code was rejected by the safety checker."
 SANDBOX_ERROR_MESSAGE = "Execution failed in the sandbox."
+AUDIT_INTERFACE = "streamlit"
+AUDIT_LOG_PATH = audit_logger.DEFAULT_AUDIT_LOG_PATH
 DOWNLOAD_MIME_TYPES = {
     ".csv": "text/csv",
     ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -264,6 +268,21 @@ def _format_pipeline_error(
     return safe_summary
 
 
+def classify_error_category(
+    message: str | None,
+    exit_code: int | None = None,
+    default_to_sandbox: bool = False,
+) -> str:
+    raw_message = "" if message is None else str(message)
+    if _is_provider_error(raw_message):
+        return "provider_failure"
+    if _is_safety_error(raw_message):
+        return "safety_violation"
+    if default_to_sandbox or exit_code:
+        return "sandbox_failure"
+    return "unknown_failure"
+
+
 def normalize_task_text(task_text: str) -> str:
     return task_text.strip()
 
@@ -386,11 +405,94 @@ def download_mime_type(suffix: str) -> str:
     return DOWNLOAD_MIME_TYPES[normalized_suffix]
 
 
+def _schema_summary_for_audit(schema: SchemaReport) -> dict[str, object]:
+    return {
+        "filename": schema.filename,
+        "file_type": schema.file_type,
+        "row_count": schema.row_count,
+        "file_size_bytes": schema.file_size_bytes,
+        "encoding": schema.encoding,
+        "sheet_names": schema.sheet_names,
+        "columns": [
+            {
+                "name": column.name,
+                "dtype": column.dtype,
+                "null_count": column.null_count,
+                "unique_count": column.unique_count,
+            }
+            for column in schema.columns
+        ],
+    }
+
+
+def _prompt_text_for_audit(prompt: PromptPayload) -> str:
+    return f"{prompt.system_prompt}\n\n{prompt.user_prompt}"
+
+
+def _write_streamlit_audit_event(
+    *,
+    run_id: str,
+    duration_ms: int,
+    success: bool,
+    input_file_name: str | None,
+    input_file_bytes: bytes,
+    task_text: str,
+    audit_metadata: MutableMapping[str, object],
+    output_file_name: str | None = None,
+    output_file_bytes: bytes | None = None,
+    error_category: str | None = None,
+) -> None:
+    config = AppConfig()
+    event = audit_logger.build_audit_event(
+        run_id=run_id,
+        interface=AUDIT_INTERFACE,
+        provider=config.llm_provider,
+        model=config.default_model,
+        provider_called=bool(audit_metadata.get("provider_called", False)),
+        success=success,
+        duration_ms=duration_ms,
+        input_file_name=input_file_name,
+        input_file_bytes=input_file_bytes,
+        task_text=task_text,
+        schema_summary=audit_metadata.get("schema_summary"),
+        prompt_text=(
+            str(audit_metadata["prompt_text"])
+            if audit_metadata.get("prompt_text") is not None
+            else None
+        ),
+        generated_code=(
+            str(audit_metadata["generated_code"])
+            if audit_metadata.get("generated_code") is not None
+            else None
+        ),
+        output_file_name=output_file_name,
+        output_file_bytes=output_file_bytes,
+        error_category=error_category,
+        attempt_count=(
+            int(audit_metadata["attempt_count"])
+            if audit_metadata.get("attempt_count") is not None
+            else None
+        ),
+        system_prompt=(
+            str(audit_metadata["system_prompt"])
+            if audit_metadata.get("system_prompt") is not None
+            else None
+        ),
+        user_prompt=(
+            str(audit_metadata["user_prompt"])
+            if audit_metadata.get("user_prompt") is not None
+            else None
+        ),
+    )
+    audit_logger.write_audit_event_best_effort(event, log_path=AUDIT_LOG_PATH)
+
+
 def run_uploaded_task(
     uploaded_file_bytes: bytes,
     upload_suffix: str,
     task_text: str,
     uploaded_file_name: str | None = None,
+    audit_metadata: MutableMapping[str, object] | None = None,
 ) -> tuple[ExecutionResult, bytes | None, str | None]:
     normalized_suffix = validate_upload_suffix(f"input{upload_suffix}")
     normalized_task = validate_task_text(task_text)
@@ -405,7 +507,16 @@ def run_uploaded_task(
         output_path = temp_dir / f"output{normalized_suffix}"
 
         schema = schema_inspector.inspect(input_path)
+        if audit_metadata is not None:
+            audit_metadata["schema_summary"] = _schema_summary_for_audit(schema)
+
         prompt = prompt_builder.build(normalized_task, schema)
+        if audit_metadata is not None:
+            audit_metadata["prompt_text"] = _prompt_text_for_audit(prompt)
+            audit_metadata["system_prompt"] = prompt.system_prompt
+            audit_metadata["user_prompt"] = prompt.user_prompt
+            audit_metadata["provider_called"] = True
+
         result = retry_handler.run(prompt, input_path, output_path)
 
         if not result.success:
@@ -503,20 +614,26 @@ def main() -> None:
                 )
             else:
                 begin_accepted_run(st.session_state, now=now)
+                audit_run_id = uuid.uuid4().hex
+                audit_metadata: dict[str, object] = {"provider_called": False}
+                audit_start = time.monotonic()
+                uploaded_file_name = st.session_state["uploaded_file_name"]
+                display_file_name = (
+                    str(uploaded_file_name)
+                    if uploaded_file_name is not None
+                    else None
+                )
+                input_file_bytes = bytes(
+                    st.session_state["uploaded_file_bytes"]
+                )
+                input_task_text = str(st.session_state["task_text"])
                 try:
-                    uploaded_file_name = st.session_state[
-                        "uploaded_file_name"
-                    ]
-                    display_file_name = (
-                        str(uploaded_file_name)
-                        if uploaded_file_name is not None
-                        else None
-                    )
                     result, output_bytes, output_file_name = run_uploaded_task(
-                        bytes(st.session_state["uploaded_file_bytes"]),
+                        input_file_bytes,
                         str(st.session_state["uploaded_file_suffix"]),
-                        str(st.session_state["task_text"]),
+                        input_task_text,
                         uploaded_file_name=display_file_name,
+                        audit_metadata=audit_metadata,
                     )
                     if result.success and output_bytes is not None:
                         result_preview = load_output_preview(
@@ -524,19 +641,52 @@ def main() -> None:
                             str(st.session_state["uploaded_file_suffix"]),
                         )
                 except Exception as exc:
+                    duration_ms = int((time.monotonic() - audit_start) * 1000)
+                    _write_streamlit_audit_event(
+                        run_id=audit_run_id,
+                        duration_ms=duration_ms,
+                        success=False,
+                        input_file_name=display_file_name,
+                        input_file_bytes=input_file_bytes,
+                        task_text=input_task_text,
+                        audit_metadata=audit_metadata,
+                        error_category=classify_error_category(str(exc)),
+                    )
                     mark_run_failure(
                         st.session_state,
                         format_exception_error(exc),
                     )
                 else:
+                    duration_ms = int((time.monotonic() - audit_start) * 1000)
                     if result.success:
                         if output_bytes is None or output_file_name is None:
+                            _write_streamlit_audit_event(
+                                run_id=audit_run_id,
+                                duration_ms=duration_ms,
+                                success=False,
+                                input_file_name=display_file_name,
+                                input_file_bytes=input_file_bytes,
+                                task_text=input_task_text,
+                                audit_metadata=audit_metadata,
+                                error_category="unknown_failure",
+                            )
                             mark_run_failure(
                                 st.session_state,
                                 "Output file was not available.",
                             )
                             st.error(str(st.session_state["error_message"]))
                         else:
+                            _write_streamlit_audit_event(
+                                run_id=audit_run_id,
+                                duration_ms=duration_ms,
+                                success=True,
+                                input_file_name=display_file_name,
+                                input_file_bytes=input_file_bytes,
+                                task_text=input_task_text,
+                                audit_metadata=audit_metadata,
+                                output_file_name=output_file_name,
+                                output_file_bytes=output_bytes,
+                            )
                             mark_run_success(
                                 st.session_state,
                                 result_preview,
@@ -545,6 +695,23 @@ def main() -> None:
                             )
                             st.success("Generation succeeded.")
                     else:
+                        error_text = (
+                            result.stderr.strip() or result.stdout.strip()
+                        )
+                        _write_streamlit_audit_event(
+                            run_id=audit_run_id,
+                            duration_ms=duration_ms,
+                            success=False,
+                            input_file_name=display_file_name,
+                            input_file_bytes=input_file_bytes,
+                            task_text=input_task_text,
+                            audit_metadata=audit_metadata,
+                            error_category=classify_error_category(
+                                error_text,
+                                exit_code=result.exit_code,
+                                default_to_sandbox=True,
+                            ),
+                        )
                         mark_run_failure(
                             st.session_state,
                             format_execution_error(result),
