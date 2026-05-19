@@ -56,14 +56,17 @@ def test_run_retries_traceback_failures_and_uses_fallback_on_final_call(
         return SafetyResult(is_safe=True)
 
     def fake_execute(
-        code: str, input_path: Path, output_path: Path
+        code: str,
+        input_path: Path,
+        output_path: Path,
+        config: AppConfig | None = None,
     ) -> ExecutionResult:
         executed_codes.append(code)
         return executions[len(executed_codes) - 1]
 
     monkeypatch.setattr(retry_handler.code_generator, "generate", fake_generate)
     monkeypatch.setattr(retry_handler.safety_checker, "check", fake_check)
-    monkeypatch.setattr(retry_handler.sandbox_executor, "execute", fake_execute)
+    monkeypatch.setattr(retry_handler.execution_backend, "execute", fake_execute)
     monkeypatch.setattr(
         retry_handler,
         "AppConfig",
@@ -104,7 +107,10 @@ def test_run_retries_stderr_context_without_traceback(
         return _script(f"code v{calls}")
 
     def fake_execute(
-        code: str, input_path: Path, output_path: Path
+        code: str,
+        input_path: Path,
+        output_path: Path,
+        config: AppConfig | None = None,
     ) -> ExecutionResult:
         if code == "code v1":
             return _failure("ValueError: bad data")
@@ -116,7 +122,7 @@ def test_run_retries_stderr_context_without_traceback(
         "check",
         lambda code: SafetyResult(is_safe=True),
     )
-    monkeypatch.setattr(retry_handler.sandbox_executor, "execute", fake_execute)
+    monkeypatch.setattr(retry_handler.execution_backend, "execute", fake_execute)
 
     result = retry_handler.run(_prompt(), tmp_path / "input.csv", tmp_path / "out.csv")
 
@@ -138,7 +144,10 @@ def test_run_does_not_retry_safety_violations(
         return _script("import os")
 
     def fake_execute(
-        code: str, input_path: Path, output_path: Path
+        code: str,
+        input_path: Path,
+        output_path: Path,
+        config: AppConfig | None = None,
     ) -> ExecutionResult:
         nonlocal execute_calls
         execute_calls += 1
@@ -153,7 +162,7 @@ def test_run_does_not_retry_safety_violations(
             violations=["Blocked unsafe import: os"],
         ),
     )
-    monkeypatch.setattr(retry_handler.sandbox_executor, "execute", fake_execute)
+    monkeypatch.setattr(retry_handler.execution_backend, "execute", fake_execute)
 
     result = retry_handler.run(_prompt(), tmp_path / "input.csv", tmp_path / "out.csv")
 
@@ -183,9 +192,11 @@ def test_run_does_not_retry_timeouts(
         lambda code: SafetyResult(is_safe=True),
     )
     monkeypatch.setattr(
-        retry_handler.sandbox_executor,
+        retry_handler.execution_backend,
         "execute",
-        lambda code, input_path, output_path: _failure("Execution timed out", -1),
+        lambda code, input_path, output_path, config=None: _failure(
+            "Execution timed out", -1
+        ),
     )
 
     result = retry_handler.run(_prompt(), tmp_path / "input.csv", tmp_path / "out.csv")
@@ -243,9 +254,11 @@ def test_run_caps_total_model_calls_at_three(
         lambda code: SafetyResult(is_safe=True),
     )
     monkeypatch.setattr(
-        retry_handler.sandbox_executor,
+        retry_handler.execution_backend,
         "execute",
-        lambda code, input_path, output_path: _failure("Traceback\nRuntimeError: bad"),
+        lambda code, input_path, output_path, config=None: _failure(
+            "Traceback\nRuntimeError: bad"
+        ),
     )
 
     result = retry_handler.run(_prompt(), tmp_path / "input.csv", tmp_path / "out.csv")
@@ -272,9 +285,9 @@ def test_run_does_not_use_fallback_for_initial_call_when_retries_disabled(
         lambda code: SafetyResult(is_safe=True),
     )
     monkeypatch.setattr(
-        retry_handler.sandbox_executor,
+        retry_handler.execution_backend,
         "execute",
-        lambda code, input_path, output_path: _success(),
+        lambda code, input_path, output_path, config=None: _success(),
     )
     monkeypatch.setattr(
         retry_handler,
@@ -295,3 +308,36 @@ def test_retry_handler_core_has_no_ui_dependencies() -> None:
     assert "rich" not in source
     assert "streamlit" not in source
     assert "sys.argv" not in source
+
+
+def test_run_checks_safety_before_execution_backend(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    events: list[str] = []
+
+    monkeypatch.setattr(
+        retry_handler.code_generator,
+        "generate",
+        lambda _prompt, model=None: _script("safe code"),
+    )
+
+    def fake_check(code: str) -> SafetyResult:
+        events.append(f"safety:{code}")
+        return SafetyResult(is_safe=True)
+
+    def fake_execute(
+        code: str,
+        input_path: Path,
+        output_path: Path,
+        config: AppConfig | None = None,
+    ) -> ExecutionResult:
+        events.append(f"execute:{code}")
+        return _success()
+
+    monkeypatch.setattr(retry_handler.safety_checker, "check", fake_check)
+    monkeypatch.setattr(retry_handler.execution_backend, "execute", fake_execute)
+
+    result = retry_handler.run(_prompt(), tmp_path / "input.csv", tmp_path / "out.csv")
+
+    assert result.success is True
+    assert events == ["safety:safe code", "execute:safe code"]

@@ -311,20 +311,23 @@ def test_cli_gate_task(
         )
 
     original_check = cli.safety_checker.check
-    original_execute = cli.sandbox_executor.execute
+    original_execute = cli.retry_handler.execution_backend.execute
 
     def check_spy(code: str) -> SafetyResult:
         safety_calls.append(code) # append the code being checked to the safety_calls list
         return original_check(code) # call the original safety check function and return its result
 
     def execute_spy(
-        code: str, input_path_arg: Path, output_path_arg: Path
+        code: str,
+        input_path_arg: Path,
+        output_path_arg: Path,
+        config=None,
     ) -> ExecutionResult:
         sandbox_calls.append((code, input_path_arg, output_path_arg))
-        return original_execute(code, input_path_arg, output_path_arg)
+        return original_execute(code, input_path_arg, output_path_arg, config)
 
     monkeypatch.setattr(cli.safety_checker, "check", check_spy)
-    monkeypatch.setattr(cli.sandbox_executor, "execute", execute_spy)
+    monkeypatch.setattr(cli.retry_handler.execution_backend, "execute", execute_spy)
 
     start = time.monotonic()
     status = cli.main(

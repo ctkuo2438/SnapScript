@@ -68,16 +68,6 @@ def _patch_pipeline(
         or (safety if safety is not None else SafetyResult(is_safe=True)),
     )
     monkeypatch.setattr(
-        cli.sandbox_executor,
-        "execute",
-        lambda code, input_path, output_path: calls.append("execute")
-        or (
-            execution
-            if execution is not None
-            else ExecutionResult(success=True, stdout="wrote output", exit_code=0)
-        ),
-    )
-    monkeypatch.setattr(
         cli.retry_handler,
         "run",
         lambda prompt, input_path, output_path: calls.append("retry")

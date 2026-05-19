@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from snapscript.config import AppConfig
-from snapscript.core import code_generator, safety_checker, sandbox_executor
+from snapscript.core import code_generator, execution_backend, safety_checker
 from snapscript.core.models import ExecutionResult, GeneratedScript, PromptPayload
 
 
@@ -32,7 +32,12 @@ def run(prompt: PromptPayload, input_path: Path, output_path: Path) -> Execution
         if not safety_result.is_safe:
             return _safety_failure(safety_result.violations)
 
-        result = sandbox_executor.execute(generated.code, input_path, output_path)
+        result = execution_backend.execute(
+            generated.code,
+            input_path,
+            output_path,
+            config,
+        )
         last_result = result
         if result.success:
             return result

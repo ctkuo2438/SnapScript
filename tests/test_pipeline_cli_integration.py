@@ -44,23 +44,26 @@ out.to_csv(OUTPUT_PATH, index=False)
         )
 
     original_check = cli.safety_checker.check
-    original_execute = cli.sandbox_executor.execute
+    original_execute = cli.retry_handler.execution_backend.execute
 
     def check_spy(code: str) -> SafetyResult:
         safety_calls.append(code)
         return original_check(code)
 
     def execute_spy(
-        code: str, input_path: Path, output_path_arg: Path
+        code: str,
+        input_path: Path,
+        output_path_arg: Path,
+        config=None,
     ) -> ExecutionResult:
         sandbox_calls.append((code, input_path, output_path_arg))
-        return original_execute(code, input_path, output_path_arg)
+        return original_execute(code, input_path, output_path_arg, config)
 
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     monkeypatch.setattr(cli.code_generator, "generate", fake_generate)
     monkeypatch.setattr(cli.safety_checker, "check", check_spy)
-    monkeypatch.setattr(cli.sandbox_executor, "execute", execute_spy)
+    monkeypatch.setattr(cli.retry_handler.execution_backend, "execute", execute_spy)
 
     status = cli.main(
         [
@@ -83,3 +86,11 @@ out.to_csv(OUTPUT_PATH, index=False)
     output = pd.read_csv(output_path)
     assert not output.empty
     assert (output["amount"] > 1000).all()
+
+
+def test_cli_uses_retry_handler_without_direct_sandbox_calls() -> None:
+    source = Path("src/snapscript/interfaces/cli.py").read_text(encoding="utf-8")
+
+    assert "retry_handler.run(" in source
+    assert "sandbox_executor" not in source
+    assert "docker_sandbox_executor" not in source
