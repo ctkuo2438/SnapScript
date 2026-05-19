@@ -189,6 +189,28 @@ def test_begin_accepted_run_clears_error_and_output_state() -> None:
     assert state["last_run_timestamp"] == 123.0
 
 
+def test_begin_accepted_run_with_timestamp_increments_run_count() -> None:
+    state: dict[str, object] = {
+        "result_preview": pd.DataFrame({"old": [1]}),
+        "output_bytes": b"old",
+        "output_file_name": "old.csv",
+        "error_message": "old error",
+        "run_count": 2,
+        "last_run_timestamp": 123.0,
+        "is_running": False,
+    }
+
+    web.begin_accepted_run(state, now=200.0)
+
+    assert state["result_preview"] is None
+    assert state["output_bytes"] is None
+    assert state["output_file_name"] is None
+    assert state["error_message"] is None
+    assert state["is_running"] is True
+    assert state["run_count"] == 3
+    assert state["last_run_timestamp"] == 200.0
+
+
 def test_mark_run_success_stores_output_and_clears_error() -> None:
     preview = pd.DataFrame({"order_id": [1]})
     state: dict[str, object] = {
@@ -256,6 +278,50 @@ def test_get_remaining_runs_never_returns_negative() -> None:
     assert web.get_remaining_runs(10) == 0
     assert web.get_remaining_runs(12) == 0
     assert web.get_remaining_runs(2, max_runs=4) == 2
+
+
+def test_check_rate_limit_accepts_when_under_limit_without_recent_run() -> None:
+    accepted, message = web.check_rate_limit(
+        run_count=2,
+        last_run_timestamp=None,
+        now=100.0,
+    )
+
+    assert accepted is True
+    assert message is None
+
+
+def test_check_rate_limit_blocks_when_run_limit_reached() -> None:
+    accepted, message = web.check_rate_limit(
+        run_count=web.MAX_RUNS_PER_SESSION,
+        last_run_timestamp=None,
+        now=100.0,
+    )
+
+    assert accepted is False
+    assert message == "Run limit reached for this session."
+
+
+def test_check_rate_limit_blocks_when_cooldown_is_active() -> None:
+    accepted, message = web.check_rate_limit(
+        run_count=2,
+        last_run_timestamp=100.0,
+        now=102.25,
+    )
+
+    assert accepted is False
+    assert message == "Please wait 2.8s before running again."
+
+
+def test_check_rate_limit_accepts_when_cooldown_has_elapsed() -> None:
+    accepted, message = web.check_rate_limit(
+        run_count=2,
+        last_run_timestamp=100.0,
+        now=105.0,
+    )
+
+    assert accepted is True
+    assert message is None
 
 
 def test_normalize_task_text_strips_whitespace() -> None:
@@ -561,6 +627,9 @@ def test_main_disables_generate_when_run_limit_reached(
     web.main()
 
     assert _button_disabled(fake_st.calls) is True
+    assert fake_st.session_state["error_message"] == (
+        "Run limit reached for this session."
+    )
 
 
 def test_main_generate_click_validates_then_calls_pipeline_helper(
@@ -600,6 +669,144 @@ def test_main_generate_click_validates_then_calls_pipeline_helper(
         )
     ]
     assert not _has_placeholder_message(fake_st.calls)
+
+
+def test_main_generate_click_increments_run_count_before_pipeline(
+    monkeypatch,
+) -> None:
+    uploaded = FakeUploadedFile("orders.csv", b"order_id,total\n1,10\n")
+    fake_st = FakeStreamlit(
+        button_clicked=True,
+        uploaded_file=uploaded,
+        task_text="Keep rows.",
+    )
+    fake_st.session_state["run_count"] = 2
+    fake_st.session_state["last_run_timestamp"] = 10.0
+    monkeypatch.setattr(web, "st", fake_st)
+    monkeypatch.setattr(web.time, "monotonic", lambda: 20.0)
+
+    def fake_run_uploaded_task(
+        _file_bytes: bytes,
+        _suffix: str,
+        _task_text: str,
+        uploaded_file_name: str | None = None,
+    ) -> tuple[web.ExecutionResult, bytes, str]:
+        assert fake_st.session_state["run_count"] == 3
+        assert fake_st.session_state["last_run_timestamp"] == 20.0
+        assert fake_st.session_state["is_running"] is True
+        return (
+            web.ExecutionResult(success=True),
+            b"order_id,total\n1,10\n",
+            web.derive_output_file_name(uploaded_file_name, ".csv"),
+        )
+
+    monkeypatch.setattr(web, "run_uploaded_task", fake_run_uploaded_task)
+
+    web.main()
+
+    assert fake_st.session_state["run_count"] == 3
+    assert fake_st.session_state["last_run_timestamp"] == 20.0
+
+
+def test_main_generate_click_updates_last_run_timestamp(
+    monkeypatch,
+) -> None:
+    uploaded = FakeUploadedFile("orders.csv", b"order_id,total\n1,10\n")
+    fake_st = FakeStreamlit(
+        button_clicked=True,
+        uploaded_file=uploaded,
+        task_text="Keep rows.",
+    )
+    monkeypatch.setattr(web, "st", fake_st)
+    monkeypatch.setattr(web.time, "monotonic", lambda: 42.0)
+    monkeypatch.setattr(
+        web,
+        "run_uploaded_task",
+        lambda _file_bytes, _suffix, _task_text, uploaded_file_name=None: (
+            web.ExecutionResult(success=True),
+            b"order_id,total\n1,10\n",
+            web.derive_output_file_name(uploaded_file_name, ".csv"),
+        ),
+    )
+
+    web.main()
+
+    assert fake_st.session_state["run_count"] == 1
+    assert fake_st.session_state["last_run_timestamp"] == 42.0
+
+
+def test_main_cooldown_blocked_generate_does_not_call_pipeline(
+    monkeypatch,
+) -> None:
+    uploaded = FakeUploadedFile("orders.csv", b"order_id,total\n1,10\n")
+    fake_st = FakeStreamlit(
+        button_clicked=True,
+        uploaded_file=uploaded,
+        task_text="Keep rows.",
+    )
+    fake_st.session_state["run_count"] = 1
+    fake_st.session_state["last_run_timestamp"] = 100.0
+    calls: list[object] = []
+    monkeypatch.setattr(web, "st", fake_st)
+    monkeypatch.setattr(web.time, "monotonic", lambda: 102.0)
+    monkeypatch.setattr(
+        web,
+        "run_uploaded_task",
+        lambda *_args, **_kwargs: calls.append((_args, _kwargs)),
+    )
+
+    web.main()
+
+    assert calls == []
+    assert fake_st.session_state["run_count"] == 1
+    assert fake_st.session_state["last_run_timestamp"] == 100.0
+    assert fake_st.session_state["error_message"] == (
+        "Please wait 3.0s before running again."
+    )
+
+
+def test_main_limit_blocked_generate_does_not_call_pipeline(
+    monkeypatch,
+) -> None:
+    uploaded = FakeUploadedFile("orders.csv", b"order_id,total\n1,10\n")
+    fake_st = FakeStreamlit(
+        button_clicked=True,
+        uploaded_file=uploaded,
+        task_text="Keep rows.",
+    )
+    fake_st.session_state["run_count"] = web.MAX_RUNS_PER_SESSION
+    fake_st.session_state["last_run_timestamp"] = 100.0
+    calls: list[object] = []
+    monkeypatch.setattr(web, "st", fake_st)
+    monkeypatch.setattr(web.time, "monotonic", lambda: 120.0)
+    monkeypatch.setattr(
+        web,
+        "run_uploaded_task",
+        lambda *_args, **_kwargs: calls.append((_args, _kwargs)),
+    )
+
+    web.main()
+
+    assert calls == []
+    assert fake_st.session_state["run_count"] == web.MAX_RUNS_PER_SESSION
+    assert fake_st.session_state["last_run_timestamp"] == 100.0
+    assert fake_st.session_state["error_message"] == (
+        "Run limit reached for this session."
+    )
+
+
+def test_main_renders_remaining_runs_display(monkeypatch) -> None:
+    fake_st = FakeStreamlit()
+    fake_st.session_state["run_count"] = 4
+    monkeypatch.setattr(web, "st", fake_st)
+
+    web.main()
+
+    assert (
+        "caption",
+        ("Remaining runs this session: 6",),
+        {},
+    ) in fake_st.calls
 
 
 def test_main_success_stores_preview_and_renders_download(

@@ -5,6 +5,7 @@ from io import BytesIO
 from pathlib import Path, PureWindowsPath
 import re
 import tempfile
+import time
 
 import pandas as pd
 import streamlit as st
@@ -14,6 +15,7 @@ from snapscript.core.models import ExecutionResult
 
 
 MAX_RUNS_PER_SESSION = 10
+COOLDOWN_SECONDS = 5
 ALLOWED_UPLOAD_SUFFIXES = {".csv", ".xlsx", ".xls"}
 MAX_UPLOAD_BYTES = 10 * 1024 * 1024
 PREVIEW_MAX_ROWS = 100
@@ -52,10 +54,16 @@ def clear_output_state(state: MutableMapping[str, object]) -> None:
     state["output_file_name"] = None
 
 
-def begin_accepted_run(state: MutableMapping[str, object]) -> None:
+def begin_accepted_run(
+    state: MutableMapping[str, object],
+    now: float | None = None,
+) -> None:
     state["error_message"] = None
     clear_output_state(state)
     state["is_running"] = True
+    if now is not None:
+        state["run_count"] = int(state.get("run_count", 0)) + 1
+        state["last_run_timestamp"] = now
 
 
 def mark_run_success(
@@ -93,6 +101,25 @@ def get_remaining_runs(
     max_runs: int = MAX_RUNS_PER_SESSION,
 ) -> int:
     return max(0, max_runs - run_count)
+
+
+def check_rate_limit(
+    run_count: int,
+    last_run_timestamp: float | None,
+    now: float,
+    max_runs: int = MAX_RUNS_PER_SESSION,
+    cooldown_seconds: int = COOLDOWN_SECONDS,
+) -> tuple[bool, str | None]:
+    if run_count >= max_runs:
+        return False, "Run limit reached for this session."
+
+    if last_run_timestamp is not None:
+        elapsed = now - last_run_timestamp
+        remaining = cooldown_seconds - elapsed
+        if remaining > 0:
+            return False, f"Please wait {remaining:.1f}s before running again."
+
+    return True, None
 
 
 def normalize_task_text(task_text: str) -> str:
@@ -290,7 +317,13 @@ def main() -> None:
     remaining_runs = get_remaining_runs(int(st.session_state["run_count"]))
     st.caption(f"Remaining runs this session: {remaining_runs}")
 
-    can_run, _disabled_reason = can_generate(st.session_state)
+    can_run, disabled_reason = can_generate(st.session_state)
+    if (
+        not can_run
+        and disabled_reason == "Run limit reached for this session."
+    ):
+        mark_validation_error(st.session_state, disabled_reason)
+
     if st.button("Generate", disabled=not can_run):
         can_run, validation_error = can_generate(st.session_state)
         if not can_run:
@@ -299,52 +332,71 @@ def main() -> None:
                 validation_error or "Cannot generate.",
             )
         else:
-            begin_accepted_run(st.session_state)
-            try:
-                uploaded_file_name = st.session_state["uploaded_file_name"]
-                display_file_name = (
-                    str(uploaded_file_name)
-                    if uploaded_file_name is not None
+            now = time.monotonic()
+            last_run_timestamp = st.session_state["last_run_timestamp"]
+            accepted, rate_limit_error = check_rate_limit(
+                int(st.session_state["run_count"]),
+                (
+                    float(last_run_timestamp)
+                    if last_run_timestamp is not None
                     else None
-                )
-                result, output_bytes, output_file_name = run_uploaded_task(
-                    bytes(st.session_state["uploaded_file_bytes"]),
-                    str(st.session_state["uploaded_file_suffix"]),
-                    str(st.session_state["task_text"]),
-                    uploaded_file_name=display_file_name,
-                )
-                if result.success and output_bytes is not None:
-                    result_preview = load_output_preview(
-                        output_bytes,
-                        str(st.session_state["uploaded_file_suffix"]),
-                    )
-            except Exception as exc:
-                mark_run_failure(
+                ),
+                now,
+            )
+            if not accepted:
+                mark_validation_error(
                     st.session_state,
-                    f"{type(exc).__name__}: {exc}",
+                    rate_limit_error or "Cannot generate.",
                 )
             else:
-                if result.success:
-                    if output_bytes is None or output_file_name is None:
-                        mark_run_failure(
-                            st.session_state,
-                            "Output file was not available.",
-                        )
-                        st.error(str(st.session_state["error_message"]))
-                    else:
-                        mark_run_success(
-                            st.session_state,
-                            result_preview,
+                begin_accepted_run(st.session_state, now=now)
+                try:
+                    uploaded_file_name = st.session_state[
+                        "uploaded_file_name"
+                    ]
+                    display_file_name = (
+                        str(uploaded_file_name)
+                        if uploaded_file_name is not None
+                        else None
+                    )
+                    result, output_bytes, output_file_name = run_uploaded_task(
+                        bytes(st.session_state["uploaded_file_bytes"]),
+                        str(st.session_state["uploaded_file_suffix"]),
+                        str(st.session_state["task_text"]),
+                        uploaded_file_name=display_file_name,
+                    )
+                    if result.success and output_bytes is not None:
+                        result_preview = load_output_preview(
                             output_bytes,
-                            output_file_name,
+                            str(st.session_state["uploaded_file_suffix"]),
                         )
-                        st.success("Generation succeeded.")
-                else:
+                except Exception as exc:
                     mark_run_failure(
                         st.session_state,
-                        format_execution_error(result),
+                        f"{type(exc).__name__}: {exc}",
                     )
-                    st.error(str(st.session_state["error_message"]))
+                else:
+                    if result.success:
+                        if output_bytes is None or output_file_name is None:
+                            mark_run_failure(
+                                st.session_state,
+                                "Output file was not available.",
+                            )
+                            st.error(str(st.session_state["error_message"]))
+                        else:
+                            mark_run_success(
+                                st.session_state,
+                                result_preview,
+                                output_bytes,
+                                output_file_name,
+                            )
+                            st.success("Generation succeeded.")
+                    else:
+                        mark_run_failure(
+                            st.session_state,
+                            format_execution_error(result),
+                        )
+                        st.error(str(st.session_state["error_message"]))
 
     st.subheader("Output")
     result_preview = st.session_state["result_preview"]
