@@ -17,6 +17,7 @@ SCRIPT_NAME = "script.py"
 PATHS_MODULE_NAME = "_snapscript_paths.py"
 DEFAULT_DOCKER_IMAGE = "snapscript-sandbox:local"
 CONTAINER_WORKDIR = "/workspace"
+DOCKER_PIDS_LIMIT = "128"
 
 
 def execute(code: str, input_path: Path, output_path: Path) -> ExecutionResult:
@@ -30,6 +31,7 @@ def execute(code: str, input_path: Path, output_path: Path) -> ExecutionResult:
 
         _write_paths_module(workspace, temp_input_path, temp_output_path)
         _write_script(workspace, code)
+        _prepare_workspace_permissions(workspace)
 
         result = _run_docker(workspace, config, start_time)
         if not result.success:
@@ -78,22 +80,45 @@ def _write_script(workspace: Path, code: str) -> None:
     (workspace / SCRIPT_NAME).write_text(code, encoding="utf-8")
 
 
+# workspace directory: container non-root user can write, read, execute
+# direct files: container non-root user can read/write, but not execute (for security)
+def _prepare_workspace_permissions(workspace: Path) -> None:
+    workspace.chmod(0o777)
+    for child in workspace.iterdir():
+        if child.is_file():
+            child.chmod(0o666)
+
+
 def _build_docker_command(
     workspace: Path,
-    image: str = DEFAULT_DOCKER_IMAGE,
+    config: AppConfig,
 ) -> list[str]:
-    return [
+    command = [
         "docker",
         "run",
         "--rm",
-        "-v",
-        f"{workspace.resolve()}:{CONTAINER_WORKDIR}",
-        "-w",
-        CONTAINER_WORKDIR,
-        image,
-        "python",
-        SCRIPT_NAME,
     ]
+    if config.docker_network_disabled:
+        command.extend(["--network", "none"])
+
+    command.extend(
+        [
+            "--memory",
+            config.docker_memory_limit,
+            "--cpus",
+            config.docker_cpu_limit,
+            "--pids-limit",
+            DOCKER_PIDS_LIMIT,
+            "-v",
+            f"{workspace.resolve()}:{CONTAINER_WORKDIR}",
+            "-w",
+            CONTAINER_WORKDIR,
+            config.docker_image,
+            "python",
+            SCRIPT_NAME,
+        ]
+    )
+    return command
 
 
 def _run_docker(
@@ -101,13 +126,13 @@ def _run_docker(
     config: AppConfig,
     start_time: float,
 ) -> ExecutionResult:
-    command = _build_docker_command(workspace)
+    command = _build_docker_command(workspace, config)
     try:
         completed = subprocess.run(
             command,
             capture_output=True,
             text=True,
-            timeout=config.execution_timeout_seconds,
+            timeout=config.docker_timeout_seconds,
             check=False,
         )
     except subprocess.TimeoutExpired as exc:
@@ -115,7 +140,7 @@ def _run_docker(
         stderr = exc.stderr if isinstance(exc.stderr, str) else ""
         message = (
             f"Docker execution timed out after "
-            f"{config.execution_timeout_seconds} seconds"
+            f"{config.docker_timeout_seconds} seconds"
         )
         if stderr:
             message = f"{message}\n{stderr}"
