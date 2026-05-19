@@ -200,6 +200,32 @@ def check_rate_limit(
 
 ## 11. Implementation Tasks
 
+**Tracking status (updated 2026-05-19):** Tasks 21 through 30 are complete.
+
+| Task | Status |
+|------|--------|
+| Task 21: Streamlit Skeleton With Core Boundary | Complete |
+| Task 22: File Upload And Temporary Input Handling | Complete |
+| Task 23: Task Text Input And Generate Button | Complete |
+| Task 24: Call Existing CLI/Core Pipeline From UI | Complete |
+| Task 25: Output Preview And Download | Complete |
+| Task 26: Session State Management | Complete |
+| Task 27: Session Rate Limiting | Complete |
+| Task 28: Error Display And Recovery UX | Complete |
+| Task 29: Streamlit Tests / Manual Verification Checklist | Complete |
+| Task 30: Gate - Phase 2 MVP Complete | Complete |
+
+Task 30 gate results on 2026-05-19:
+
+- `uv run pytest`: passed, 212 tests.
+- `env -u ANTHROPIC_API_KEY uv run pytest`: passed, 212 tests.
+- `uv run python main.py --help`: passed.
+- `SNAPSCRIPT_REAL_PROVIDER=1 uv run pytest tests/integration/test_cli_gate_tasks.py`: passed, 10/10.
+- `uv run streamlit run app.py`: launched locally.
+- Manual Streamlit gate flow passed with the Task 02 fixture through upload, Generate, preview, download availability, and cooldown behavior.
+- `src/snapscript/core/` remained UI-free.
+- Streamlit continued to call the existing safe path through `retry_handler.run(...)`.
+
 ### Task 21: Streamlit Skeleton With Core Boundary
 
 **Goal:** Add the minimum Streamlit entrypoint and page shell without running provider calls.
