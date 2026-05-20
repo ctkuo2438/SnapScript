@@ -530,48 +530,80 @@ uv run pytest tests/test_mcp_server.py tests/test_retry_handler.py
 env -u ANTHROPIC_API_KEY uv run pytest
 ```
 
-## 9. Task 42: Gate - Phase 3 Hardening Complete
+## 9. Task 42: Gate - Phase 3A Docker Hardening Complete
 
-**Goal:** Define the final Phase 3 gate.
+**Goal:** Confirm the Docker sandbox hardening path is complete and safe enough for GitHub public release.
 
-**Dependencies:** Tasks 32-41.
+**Dependencies:** Tasks 32-36.
+
+**Deferred:** Tasks 37-41 are deferred as future integration work:
+
+- Task 37: Define Desktop App Boundary
+- Task 38: Add Local JSON Command Interface
+- Task 39: Minimal Tauri Shell
+- Task 40: MCP Server Skeleton
+- Task 41: MCP `transform_file` Tool
 
 **Acceptance criteria:**
+
 - Full test suite passes.
 - Normal pytest does not require Docker.
 - Normal pytest does not require provider credentials.
 - CLI still works.
 - Streamlit still works.
 - Core remains interface-agnostic.
-- `safety_checker` remains mandatory.
+- `safety_checker.check(...)` remains mandatory before execution.
+- `retry_handler.run(...)` remains the high-level execution path.
+- `execution_backend.execute(...)` selects subprocess or Docker based on `AppConfig.sandbox_backend`.
+- Subprocess sandbox remains the default backend.
+- Docker sandbox is opt-in through config or `SNAPSCRIPT_SANDBOX_BACKEND=docker`.
 - Docker sandbox path works when explicitly enabled.
 - Subprocess sandbox path remains available unless a later deprecation task is approved.
-- No generated code runs directly in CLI, Streamlit, Tauri, or MCP.
-- `retry_handler.run(...)` remains the high-level execution path.
-- Real-provider Docker gate passes when explicitly enabled.
+- Docker image builds successfully.
+- Docker command includes runtime restrictions:
+  - `--network none` by default
+  - memory limit
+  - CPU limit
+  - PID limit
+  - per-run temporary workspace mount only
+- Docker command does not mount the repository root.
+- Docker command does not mount the user home directory.
+- Docker workspace permissions allow the non-root container user to read copied input/script files and write output only inside the per-run temporary workspace.
+- No generated code runs directly in CLI or Streamlit.
 - Audit logging remains safe and metadata-only by default.
-- Raw uploaded datasets, prompts, generated code, API keys, `.env` contents, and secrets are not logged by default.
-- No Phase 3 non-goals were added.
+- Raw uploaded datasets, prompts, generated code, API keys, `.env` contents, environment variables, secrets, and full tracebacks are not logged by default.
+- No Phase 3A non-goals were added.
 
 **Suggested verification commands:**
+
 ```bash
 uv run pytest
 env -u ANTHROPIC_API_KEY uv run pytest
 uv run python main.py --help
 SNAPSCRIPT_SANDBOX_BACKEND=subprocess uv run pytest
-SNAPSCRIPT_SANDBOX_BACKEND=docker uv run pytest tests/test_docker_sandbox_executor.py
+docker build -t snapscript-sandbox:local docker/sandbox
+SNAPSCRIPT_SANDBOX_BACKEND=docker uv run pytest tests/test_docker_sandbox_executor.py tests/test_execution_backend.py tests/test_retry_handler.py
+```
+
+**Optional real-provider Docker gate:**
+
+Run only when explicitly validating the real-provider Docker path and when API usage is acceptable:
+
+```bash
 SNAPSCRIPT_REAL_PROVIDER=1 SNAPSCRIPT_SANDBOX_BACKEND=docker uv run pytest tests/integration/test_cli_gate_tasks.py
 ```
 
-Manual checks:
+**Manual checks:**
 
 - Launch Streamlit and complete the Task 02 fixture flow.
 - Run the CLI against the Task 02 fixture with subprocess backend.
 - Run the CLI against the Task 02 fixture with Docker backend.
-- Confirm Docker network restrictions are active.
+- Confirm Docker image builds successfully.
+- Confirm Docker command includes `--network none`, memory limit, CPU limit, and PID limit.
+- Confirm Docker mounts only the per-run temporary workspace.
 - Confirm audit logs contain metadata and hashes only by default.
-- If Tauri is implemented, run the desktop smoke flow.
-- If MCP transform is implemented, run a local MCP transform with a mocked provider or explicit real-provider opt-in.
+- Confirm `.env`, API keys, raw uploaded data, raw prompts, and generated code are not logged by default.
+- Confirm Tauri and MCP work is deferred, not partially implemented.
 
 ## 10. Recommended Task Order
 
@@ -589,7 +621,7 @@ Implement Phase 3 in this order:
 | Task 39 | Minimal Tauri Shell | After JSON command |
 | Task 40 | MCP Server Skeleton | After Docker router |
 | Task 41 | MCP `transform_file` Tool | After MCP skeleton |
-| Task 42 | Gate - Phase 3 Hardening Complete | Final gate |
+| Task 42 | Gate - Phase 3A Docker Hardening Complete | Phase 3A gate |
 
 Do not start Tasks 37-41 until Task 36 is complete unless the work is limited to documentation that does not affect code paths.
 
