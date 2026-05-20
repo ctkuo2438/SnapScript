@@ -3,11 +3,15 @@ __pycache__/
 *.pyc
 *.py[cod]
 .venv/
+.pytest_cache/
 .ruff_cache/
 
 # Environment
 .env
+.env.*
+!.env.example
 logs/
+*.log
 
 # macOS
 .DS_Store
