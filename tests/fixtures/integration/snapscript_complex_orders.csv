@@ -1,0 +1,83 @@
+order_id,customer_id,email,first_name,last_name,order_date,ship_date,region,country,sales_channel,product_category,product_name,quantity,unit_price,discount_pct,shipping_fee,tax_amount,currency,payment_status,fulfillment_status,priority,promo_code,notes
+ORD-1001,CUST-101,luna.wang@example.com,Luna,Wang,2026-04-05,2026-04-10,NORTH,USA,partner,Home,Coffee Mug,two,N/A,0,0,2.8,,chargeback,old,,NONE,address needs review
+ORD-1002,CUST-116,david.patel@test.org,David,Patel,2026-02-05,2026/02/05,West,U.S.,Mobile App,Books,SQL Handbook,4,USD 61.17,0,0,,CAD,refunded,new,urgent,WELCOME10,address needs review
+ORD-1003,CUST-140,ivy.brown@test.org,Ivy,Brown,2026/03/21,2026-03-28,South,USA,mobile,Grocery,Coffee Beans,1,USD 234.15,0,3.99,unknown,CAD,pending,processing,high,bad_code,customer requested invoice
+ORD-1004,CUST-102,luna.wang@test.org,Luna,Wang,2026/03/23,2026/03/25,South,CA,mobile,Home,Desk Lamp,,137.77,,,,USD,paid,processing,,bad_code,rush order
+ORD-1005,CUST-123,frank.lee@test.org,Frank,Lee,2026/03/05,03/17/2026,East,USA,store,Home,Storage Box,2,,0.2,5.99,unknown,,FAILED,new,low,WELCOME10,customer requested invoice
+ORD-1006,CUST-117,carol.smith@test.org,Carol,Smith,02/24/2026,02/25/2026,South,US,mobile,Toys,Board Game,two,,bad,0,0,US Dollar,FAILED,processing,urgent,WELCOME10,address needs review
+ORD-1007,CUST-131,mason.brown@test.org,Mason,Brown,2026/04/08,2026-04-10,West,US,mobile,Grocery,Granola,two,$216.27,0.1,3.99,0,,,,high,SPRING15,gift wrap
+ORD-1008,CUST-112,alice.lee@test.org,Alice,Lee,2026/01/11,01/12/2026,east,CA,partner,Electronics,Wireless Mouse,2,,0.05,5.99,unknown,usd,chargeback,shipped,urgent,,address needs review
+ORD-1009,CUST-121,henry.wang@example.com,Henry,Wang,01/29/2026,2026-01-30,west,Canada,Web,Toys,Building Blocks,-1,83.31,,free,0,USD,pending,old,urgent,SPRING15,fragile item
+ORD-1010,CUST-106,ivy.smith@test.org,Ivy,Smith,2026-03-15,,West,CA,partner,Books,ML Basics,3,40.26,0.15,5.99,unknown,US Dollar,pending,,low,SPRING15,
+ORD-1011,CUST-115,david.lee@test.org,David,Lee,02/27/2026,2026-03-01,WEST,CA,Mobile App,Beauty,Lip Balm,3,307.07,0.15,,0,USD,FAILED,processing,urgent,WELCOME10,fragile item
+ORD-1012,CUST-103,carol.kim@example.com,Carol,Kim,02/19/2026,02/24/2026,West,Canada,Mobile App,Books,ML Basics,2,$72.95,0,,0,US Dollar,refunded,,,SPRING15,gift wrap
+ORD-1013,CUST-137,alice.miller@example.com,Alice,Miller,2026-04-19,2026/04/21,,Canada,mobile,Electronics,Wireless Mouse,10,,0.05,,0,EUR,pending,processing,high,SPRING15,duplicate?
+ORD-1014,CUST-104,eva.kim@example.com,Eva,Kim,03/27/2026,04/01/2026,East,United States,mobile,Electronics,USB-C Hub,,,0,0,,usd,Paid,delivered,,bad_code,gift wrap
+ORD-1015,CUST-121,alice.chen@example.com,Eva,Davis,2026/03/09,2026/03/09,East,U.S.,partner,Beauty,Face Cream,2,98.45,,,,,,shipped,,NONE,rush order
+ORD-1016,CUST-107,eva.chen@example.com,Eva,Chen,03/23/2026,2026-04-04,west,U.S.,Web,Electronics,Keyboard,2,USD 225.89,0.05,free,unknown,,refunded,new,high,,
+ORD-1017,CUST-109,ivy.smith@mail.com,Ivy,Smith,01/17/2026,01/17/2026,East,,Web,Electronics,Keyboard,3,241.27,0,5.99,unknown,,,,medium,NONE,duplicate?
+ORD-1018,CUST-129,alice.smith@test.org,Alice,Smith,2026/02/12,2026/02/24,South,United States,,Home,Storage Box,2,277.28,0.15,0,21.54,usd,,,medium,SPRING15,fragile item
+ORD-1019,CUST-138,alice.lee@mail.com,Alice,Lee,2026-02-12,02/17/2026,south,United States,partner,Beauty,Lip Balm,two,121.25,0,5.99,,USD,,shipped,urgent,,
+ORD-1020,CUST-104,ivy.wang@mail.com,Ivy,Wang,03/15/2026,2026-03-18,South,Canada,mobile,Grocery,Olive Oil,1,,,free,23.54,CAD,chargeback,,low,bad_code,customer requested invoice
+ORD-1021,CUST-119,eva.miller@mail.com,Eva,Miller,03/27/2026,04/08/2026,south,Canada,,Grocery,Granola,two,N/A,,12.5,17.09,,paid,shipped,high,SPRING15,address needs review
+ORD-1022,CUST-115,bob.smith@mail.com,Grace,Davis,03/25/2026,04/01/2026,east,USA,,Books,Data Engineering 101,two,169.83,0.05,free,,USD,Paid,processing,low,WELCOME10,fragile item
+ORD-1023,CUST-111,david.patel@test.org,David,Patel,04/19/2026,04/20/2026,NORTH,CA,web,Grocery,Green Tea,10,$177.08,0.05,free,0,EUR,refunded,processing,low,NONE,rush order
+ORD-1024,CUST-133,carol.patel@test.org,Carol,Patel,03/09/2026,2026/03/16,North,U.S.,Web,Grocery,Olive Oil,two,$160.5,,12.5,11.53,US Dollar,pending,delivered,low,bad_code,gift wrap
+ORD-1025,CUST-129,eva.lee@mail.com,Eva,Lee,2026/02/12,2026-02-19,south,US,Web,Home,Desk Lamp,3,$139.0,,3.99,unknown,CAD,,delivered,urgent,,address needs review
+ORD-1026,CUST-117,mason.chen@test.org,Mason,Chen,2026-02-18,,south,CA,web,Beauty,Sunscreen,10,N/A,0.2,free,18.5,EUR,FAILED,shipped,urgent,bad_code,rush order
+ORD-1027,CUST-113,carol.patel@example.com,Carol,Patel,03/21/2026,2026/03/21,North,United States,mobile,Toys,Puzzle Set,1,$227.82,bad,12.5,,EUR,,delivered,high,NONE,gift wrap
+ORD-1028,CUST-107,alice.chen@example.com,Eva,Wang,01/03/2026,2026-01-03,,USA,Mobile App,Grocery,Coffee Beans,1,$265.95,0.05,0,15.72,usd,chargeback,shipped,high,SPRING15,customer requested invoice
+ORD-1029,CUST-119,jack.davis@test.org,Jack,Davis,2026-04-02,04/03/2026,,,web,Electronics,USB-C Hub,4,N/A,0.15,free,5.36,USD,,cancelled,low,VIP20,duplicate?
+ORD-1030,CUST-127,ivy.kim@test.org,Ivy,Kim,2026/02/17,2026/02/18,WEST,U.S.,store,Beauty,Face Cream,10,289.24,0.15,5.99,unknown,US Dollar,chargeback,shipped,,,rush order
+ORD-1031,CUST-120,henry.patel@mail.com,Henry,Patel,04/16/2026,2026-04-21,WEST,CA,Web,Electronics,Keyboard,,N/A,0.2,,,USD,pending,,high,VIP20,customer requested invoice
+ORD-1032,CUST-101,eva.davis@test.org,Eva,Davis,2026/02/05,2026-02-05,west,United States,Web,Electronics,Wireless Mouse,10,$175.09,,12.5,unknown,EUR,FAILED,old,medium,VIP20,fragile item
+ORD-1033,CUST-134,luna.davis@mail.com,Luna,Davis,03/02/2026,2026/03/09,WEST,USA,Web,Toys,Toy Car,5,USD 248.38,0.1,5.99,6.15,CAD,chargeback,delivered,high,bad_code,
+ORD-1034,CUST-108,jack.miller@test.org,Jack,Miller,2026-02-06,02/07/2026,North,US,,Home,Storage Box,2,111.38,0.2,3.99,0,,paid,cancelled,high,NONE,gift wrap
+ORD-1035,CUST-105,henry.patel@mail.com,Henry,Patel,01/24/2026,01/24/2026,East,US,store,Electronics,USB-C Hub,10,,,free,1.81,,,delivered,,,gift wrap
+ORD-1036,CUST-116,jack.lee@test.org,Jack,Lee,02/18/2026,,west,USA,Web,Beauty,Lip Balm,4,202.47,0.2,free,2.93,US Dollar,Paid,cancelled,low,SPRING15,rush order
+ORD-1037,CUST-140,alice.kim@mail.com,Alice,Kim,03/30/2026,,,U.S.,,Electronics,Wireless Mouse,4,249.78,bad,12.5,2.24,CAD,Paid,delivered,low,,fragile item
+ORD-1038,CUST-117,david.smith@mail.com,David,Smith,2026-04-16,2026-04-18,NORTH,Canada,Mobile App,Home,Storage Box,-1,,0.1,12.5,,US Dollar,FAILED,new,,WELCOME10,customer requested invoice
+ORD-1039,CUST-127,grace.garcia@test.org,Grace,Garcia,2026-02-02,2026-02-02,North,US,Mobile App,Grocery,Coffee Beans,4,$205.08,0.15,,,usd,pending,delivered,high,VIP20,address needs review
+ORD-1040,CUST-100,luna.wang@example.com,Luna,Wang,2026/02/12,02/24/2026,NORTH,CA,Mobile App,Beauty,Lip Balm,two,20.55,0.1,5.99,unknown,,paid,processing,,VIP20,fragile item
+ORD-1041,CUST-119,alice.chen@example.com,Jack,Patel,2026-02-26,02/26/2026,NORTH,US,store,Toys,Building Blocks,4,157.84,0.15,0,1.21,US Dollar,FAILED,new,medium,WELCOME10,rush order
+ORD-1042,CUST-132,henry.wang@test.org,Henry,Wang,04/17/2026,2026/04/19,WEST,,web,Beauty,Sunscreen,10,N/A,0.05,12.5,unknown,usd,pending,,urgent,VIP20,address needs review
+ORD-1043,CUST-112,ivy.brown@example.com,Ivy,Brown,2026/02/06,2026/02/11,East,Canada,Mobile App,Grocery,Olive Oil,2,N/A,0.1,5.99,unknown,EUR,Paid,,urgent,WELCOME10,gift wrap
+ORD-1044,CUST-133,frank.patel@test.org,Frank,Patel,04/14/2026,2026/04/26,North,US,partner,Grocery,Green Tea,,$337.97,0.2,,0,EUR,Paid,delivered,medium,WELCOME10,
+ORD-1045,CUST-118,bob.smith@mail.com,Henry,Brown,2026/03/21,2026-04-02,East,U.S.,web,Beauty,Lip Balm,5,N/A,bad,,0,usd,FAILED,new,low,NONE,duplicate?
+ORD-1046,CUST-105,carol.brown@example.com,Carol,Brown,2026-01-06,01/13/2026,,,Mobile App,Beauty,Sunscreen,10,,0.15,,17.2,usd,refunded,old,medium,NONE,rush order
+ORD-1047,CUST-140,jack.smith@example.com,Jack,Smith,03/01/2026,03/06/2026,south,U.S.,mobile,Grocery,Coffee Beans,,316.21,0.2,3.99,,,FAILED,,high,SPRING15,gift wrap
+ORD-1048,CUST-131,grace.patel@example.com,Grace,Patel,2026/01/31,02/12/2026,east,,,Toys,Toy Car,4,15.50,0.15,5.99,0,,Paid,cancelled,high,SPRING15,duplicate?
+ORD-1049,CUST-126,luna.lee@test.org,Luna,Lee,2026/02/02,2026-02-04,WEST,USA,Web,Grocery,Coffee Beans,4,277.7,0.2,5.99,0,CAD,,cancelled,high,,gift wrap
+ORD-1050,CUST-105,ivy.brown@example.com,Ivy,Brown,02/02/2026,,south,US,mobile,Grocery,Granola,1,168.17,0.05,3.99,unknown,,refunded,new,urgent,VIP20,gift wrap
+ORD-1051,CUST-129,luna.brown@test.org,Luna,Brown,2026-02-18,2026/02/25,east,U.S.,Mobile App,Home,Air Filter,1,,0.1,,0,US Dollar,paid,processing,low,WELCOME10,fragile item
+ORD-1052,CUST-106,eva.patel@example.com,Eva,Patel,2026/01/13,2026-01-16,North,Canada,Mobile App,Books,ML Basics,5,237.31,,,10.77,EUR,pending,new,high,SPRING15,duplicate?
+ORD-1053,CUST-138,henry.patel@example.com,Henry,Patel,2026-04-20,2026/04/27,West,US,,Beauty,Sunscreen,1,$144.16,0,12.5,2.75,US Dollar,pending,processing,medium,,duplicate?
+ORD-1054,CUST-101,david.wang@test.org,David,Wang,2026-01-27,01/30/2026,WEST,US,mobile,Home,Coffee Mug,4,$301.57,0.05,,6.64,USD,,,medium,,duplicate?
+ORD-1055,CUST-133,frank.chen@example.com,Frank,Chen,2026-02-03,2026/02/03,east,CA,partner,Books,Python Guide,1,USD 170.88,0.2,,3.17,,paid,new,urgent,NONE,
+ORD-1056,CUST-133,grace.wang@mail.com,Grace,Wang,2026-04-02,,east,CA,store,Electronics,Keyboard,-1,$58.73,0.1,,,EUR,refunded,delivered,low,bad_code,address needs review
+ORD-1057,CUST-116,bob.miller@test.org,Bob,Miller,04/21/2026,04/24/2026,South,USA,partner,Home,Air Filter,5,N/A,0.15,free,unknown,CAD,FAILED,new,low,WELCOME10,duplicate?
+ORD-1058,CUST-119,bob.kim@example.com,Bob,Kim,2026-04-06,2026/04/13,South,US,store,Electronics,Keyboard,1,148.50,bad,12.5,0,CAD,refunded,processing,medium,bad_code,address needs review
+ORD-1059,CUST-117,alice.chen@example.com,Henry,Lee,2026-02-14,02/21/2026,West,USA,mobile,Toys,Building Blocks,10,,0.2,free,0,,chargeback,,high,VIP20,duplicate?
+ORD-1060,CUST-120,bob.smith@mail.com,Frank,Chen,2026-01-19,2026-01-31,,Canada,web,Grocery,Coffee Beans,1,$263.17,0.15,12.5,11.61,CAD,paid,processing,medium,,gift wrap
+ORD-1061,CUST-137,alice.wang@mail.com,Alice,Wang,02/26/2026,2026/03/10,North,Canada,partner,Books,ML Basics,4,,0,5.99,,US Dollar,pending,new,medium,NONE,duplicate?
+ORD-1062,CUST-114,jack.chen@example.com,Jack,Chen,2026-01-27,2026-02-01,NORTH,Canada,,Beauty,Sunscreen,5,N/A,,12.5,unknown,,chargeback,,high,WELCOME10,duplicate?
+ORD-1063,CUST-139,grace.chen@mail.com,Grace,Chen,2026-01-03,,North,,partner,Beauty,Lip Balm,-1,146.31,0.15,5.99,0,CAD,pending,new,urgent,WELCOME10,rush order
+ORD-1064,CUST-109,david.kim@test.org,David,Kim,02/21/2026,02/22/2026,East,US,Web,Grocery,Granola,3,$121.91,0,,16.01,CAD,pending,processing,medium,,gift wrap
+ORD-1065,CUST-128,carol.wang@example.com,Carol,Wang,04/09/2026,,east,,mobile,Toys,Board Game,-1,,0.1,free,unknown,USD,refunded,new,high,,customer requested invoice
+ORD-1066,CUST-136,bob.brown@mail.com,Bob,Brown,2026-02-27,02/27/2026,East,United States,store,Beauty,Face Cream,1,,0.15,12.5,0,EUR,FAILED,cancelled,medium,WELCOME10,fragile item
+ORD-1067,CUST-124,henry.wang@mail.com,Henry,Wang,2026/04/02,2026/04/03,south,,mobile,Home,Coffee Mug,3,N/A,0.2,,,CAD,chargeback,cancelled,low,bad_code,gift wrap
+ORD-1068,CUST-125,luna.garcia@example.com,Luna,Garcia,2026/02/12,2026/02/13,WEST,Canada,partner,Books,SQL Handbook,4,255.52,0.2,3.99,8.67,CAD,paid,shipped,,NONE,gift wrap
+ORD-1069,CUST-108,luna.garcia@example.com,Luna,Garcia,2026/03/27,2026/03/28,WEST,US,mobile,Books,SQL Handbook,1,$132.01,0.05,5.99,unknown,usd,,,low,,rush order
+ORD-1070,CUST-102,ivy.miller@example.com,Ivy,Miller,2026/03/26,2026-04-02,south,United States,partner,Toys,Board Game,2,63.49,bad,,20.32,US Dollar,chargeback,processing,urgent,,customer requested invoice
+ORD-1071,CUST-112,eva.patel@example.com,Eva,Patel,03/10/2026,03/13/2026,,USA,,Home,Storage Box,-1,N/A,bad,5.99,unknown,usd,pending,new,urgent,VIP20,fragile item
+ORD-1072,CUST-101,ivy.wang@test.org,Ivy,Wang,04/19/2026,2026-04-20,south,US,Mobile App,Home,Storage Box,,$317.61,bad,12.5,2.75,EUR,refunded,shipped,medium,NONE,gift wrap
+ORD-1073,CUST-128,alice.chen@example.com,Bob,Garcia,2026-01-04,2026/01/11,,US,web,Grocery,Granola,2,USD 55.06,bad,12.5,17.55,US Dollar,paid,shipped,medium,SPRING15,customer requested invoice
+ORD-1074,CUST-134,ivy.davis@test.org,Ivy,Davis,02/24/2026,2026-02-25,West,U.S.,store,Beauty,Face Cream,1,89.55,bad,,0,EUR,refunded,processing,medium,VIP20,address needs review
+ORD-1075,CUST-130,grace.chen@test.org,Grace,Chen,2026/02/15,02/18/2026,West,U.S.,Mobile App,Home,Coffee Mug,two,341.33,0.2,,0,EUR,pending,shipped,low,VIP20,fragile item
+ORD-1076,CUST-140,bob.garcia@example.com,Bob,Garcia,2026/04/04,2026/04/05,WEST,,Web,Beauty,Shampoo,1,USD 128.49,bad,free,unknown,US Dollar,paid,old,urgent,WELCOME10,customer requested invoice
+ORD-1077,CUST-121,eva.lee@example.com,Eva,Lee,2026-04-12,04/15/2026,east,US,,Beauty,Lip Balm,two,169.9,bad,free,,USD,pending,delivered,urgent,bad_code,fragile item
+ORD-1078,CUST-120,henry.kim@mail.com,Henry,Kim,2026/01/24,,west,US,mobile,Books,SQL Handbook,two,99.22,,12.5,2.43,,chargeback,shipped,high,NONE,gift wrap
+ORD-1079,CUST-140,jack.kim@example.com,Jack,Kim,03/30/2026,,south,United States,store,Books,Python Guide,5,N/A,0.1,free,0,USD,,old,medium,WELCOME10,duplicate?
+ORD-1080,CUST-128,carol.davis@test.org,Carol,Davis,2026-04-11,,South,United States,Mobile App,Home,Coffee Mug,3,USD 274.25,0.1,12.5,0,,,new,,SPRING15,rush order
+ORD-2001,CUST-123,frank.lee@test.org,Frank,Lee,2026-05-01,03/17/2026,East,USA,store,Home,Storage Box,2,,0.2,5.99,unknown,,FAILED,new,low,WELCOME10,duplicate later order
+ORD-2002,CUST-115,david.lee@test.org,David,Lee,02/27/2026,2026-03-01,WEST,CA,Mobile App,Beauty,Lip Balm,3,307.07,0.15,,0,USD,refunded,processing,urgent,WELCOME10,duplicate refund

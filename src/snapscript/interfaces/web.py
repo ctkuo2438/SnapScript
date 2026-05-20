@@ -742,3 +742,7 @@ def main() -> None:
         st.error(str(error_message))
     else:
         st.info("No errors.")
+
+# The entry point for running the Streamlit app
+if __name__ == "__main__":
+    main()
