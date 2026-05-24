@@ -18,7 +18,8 @@ class AppConfig:
     max_tokens: int = 4096
     temperature: float = 0.0
 
-    # Execution
+    # Execution, default is subprocess sandbox, 
+    #   can be switched to docker via SNAPSCRIPT_SANDBOX_BACKEND=docker
     execution_timeout_seconds: int = 30
     max_retries: int = 2
     max_output_file_size_bytes: int = 100 * 1024 * 1024
@@ -60,10 +61,10 @@ class AppConfig:
     )
 
     # File and schema handling
-    max_input_file_size_bytes: int = 500 * 1024 * 1024
-    schema_sample_rows: int = 5
-    schema_inspect_rows: int = 1000
-    max_column_name_chars: int = 100
+    max_input_file_size_bytes: int = 500 * 1024 * 1024 # file size over 500 mb will be rejected
+    schema_sample_rows: int = 5 # df.head(5) for LLM to understand the data when generating code, can be adjusted based on token limits and complexity of data
+    schema_inspect_rows: int = 1000 # number of rows to read when inspecting schema
+    max_column_name_chars: int = 100 # each column name will not exceed 100 characters
 
     # Safety
     allowed_imports: frozenset[str] = frozenset(
@@ -86,7 +87,7 @@ class AppConfig:
     )
 
     # Prompt
-    max_prompt_tokens: int = 8000
+    max_prompt_tokens: int = 8000 # about 6000 english words
 
     def __post_init__(self) -> None:
         sandbox_backend = self.sandbox_backend.strip().lower()

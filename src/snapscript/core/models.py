@@ -6,6 +6,7 @@ from pathlib import Path
 
 
 @dataclass
+# represents metadata about a single column in the input data
 class ColumnInfo:
     name: str
     dtype: str
@@ -15,6 +16,7 @@ class ColumnInfo:
 
 
 @dataclass
+# represents the overall schema and metadata of the input file, used for prompt generation and safety checks
 class SchemaReport:
     filename: str
     file_type: str
@@ -27,12 +29,14 @@ class SchemaReport:
 
 
 @dataclass
+# represents the payload for prompt generation, including system and user prompts
 class PromptPayload:
     system_prompt: str
     user_prompt: str
 
 
 @dataclass
+# represents the generated code and related metadata after prompt generation
 class GeneratedScript:
     code: str
     raw_response: str
@@ -42,6 +46,7 @@ class GeneratedScript:
 
 
 @dataclass
+# represents the result of safety checks performed on the generated code, including any violations found
 class SafetyResult:
     is_safe: bool
     violations: list[str] = field(default_factory=list)
@@ -49,6 +54,7 @@ class SafetyResult:
 
 
 @dataclass
+# represents the result of executing the generated code, including success status, output, and any files produced
 class ExecutionResult:
     success: bool
     stdout: str = ""

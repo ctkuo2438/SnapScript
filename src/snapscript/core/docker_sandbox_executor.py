@@ -1,3 +1,16 @@
+'''
+schema_inspector.inspect(...)
+  -> prompt_builder.build(...)
+  -> retry_handler.run(...)
+      -> code_generator.generate(...)
+      -> safety_checker.check(...)
+      -> execution_backend.execute(...)
+          -> sandbox_executor.execute(...) # subprocess backend
+          -> docker_sandbox_executor.execute(...) # Docker backend
+
+when the config is SNAPSCRIPT_SANDBOX_BACKEND=docker
+'''
+
 from __future__ import annotations
 
 import json
@@ -15,7 +28,7 @@ from snapscript.core.models import ExecutionResult
 
 SCRIPT_NAME = "script.py"
 PATHS_MODULE_NAME = "_snapscript_paths.py"
-DEFAULT_DOCKER_IMAGE = "snapscript-sandbox:local"
+# DEFAULT_DOCKER_IMAGE = "snapscript-sandbox:local"
 CONTAINER_WORKDIR = "/workspace"
 DOCKER_PIDS_LIMIT = "128"
 
@@ -29,8 +42,9 @@ def execute(code: str, input_path: Path, output_path: Path) -> ExecutionResult:
         temp_input_path = _copy_input_to_workspace(input_path, workspace)
         temp_output_path = workspace / _temp_output_name(Path(output_path))
 
-        _write_paths_module(workspace, temp_input_path, temp_output_path)
+        _write_paths_module(workspace, temp_input_path, temp_output_path) # container paths
         _write_script(workspace, code)
+        # chmod workspace/files for non-root user in docker to read/write/execute
         _prepare_workspace_permissions(workspace)
 
         result = _run_docker(workspace, config, start_time)
@@ -49,6 +63,8 @@ def execute(code: str, input_path: Path, output_path: Path) -> ExecutionResult:
                 duration=_duration(start_time),
             )
 
+        # successfully validated and copied output to requested location, 
+        #   return success result with stdout and stderr from docker execution
         requested_output_path = Path(output_path)
         return ExecutionResult(
             success=True,
@@ -66,9 +82,7 @@ def _copy_input_to_workspace(input_path: Path, workspace: Path) -> Path:
     return temp_input_path
 
 
-def _write_paths_module(
-    workspace: Path, input_path: Path, output_path: Path
-) -> None:
+def _write_paths_module(workspace: Path, input_path: Path, output_path: Path) -> None:
     content = (
         f"INPUT_PATH = {json.dumps(_container_path(input_path))}\n"
         f"OUTPUT_PATH = {json.dumps(_container_path(output_path))}\n"
@@ -80,24 +94,25 @@ def _write_script(workspace: Path, code: str) -> None:
     (workspace / SCRIPT_NAME).write_text(code, encoding="utf-8")
 
 
-# workspace directory: container non-root user can write, read, execute
-# direct files: container non-root user can read/write, but not execute (for security)
+# chmod workspace/files for non-root user in docker to read/write/execute
 def _prepare_workspace_permissions(workspace: Path) -> None:
-    workspace.chmod(0o777)
+    workspace.chmod(0o777) # workspace directory, 0o777: read/write/execute for owner/group/others
     for child in workspace.iterdir():
         if child.is_file():
-            child.chmod(0o666)
+            child.chmod(0o666) # direct files, 0o666: read/write for owner/group/others
 
 
-def _build_docker_command(
-    workspace: Path,
-    config: AppConfig,
-) -> list[str]:
+'''
+Ex:
+docker run --rm --memory 512m --cpus 0.5 --pids-limit 128 -v /tmp/snapscript_docker_abc123:/workspace -w /workspace snapscript-sandbox:local python script.py
+'''
+def _build_docker_command(workspace: Path, config: AppConfig) -> list[str]:
     command = [
         "docker",
         "run",
         "--rm",
     ]
+    # if disable docker network for better security, add --network none to the command
     if config.docker_network_disabled:
         command.extend(["--network", "none"])
 
@@ -121,11 +136,7 @@ def _build_docker_command(
     return command
 
 
-def _run_docker(
-    workspace: Path,
-    config: AppConfig,
-    start_time: float,
-) -> ExecutionResult:
+def _run_docker(workspace: Path, config: AppConfig, start_time: float,) -> ExecutionResult:
     command = _build_docker_command(workspace, config)
     try:
         completed = subprocess.run(
@@ -150,6 +161,8 @@ def _run_docker(
             stdout=stdout,
             duration=_duration(start_time),
         )
+    # if user doesn't have docker intalled or shell cannot find docker executable, 
+    #   return failure result with error message
     except FileNotFoundError as exc:
         return _failure_result(
             stderr=f"Docker executable not found: {exc}",
@@ -175,10 +188,7 @@ def _run_docker(
     )
 
 
-def _validate_and_copy_output(
-    temp_output_path: Path,
-    requested_output_path: Path,
-) -> str | None:
+def _validate_and_copy_output(temp_output_path: Path, requested_output_path: Path) -> str | None:
     validation_error = _validate_output(temp_output_path)
     if validation_error is not None:
         return validation_error
@@ -218,12 +228,7 @@ def _container_path(path: Path) -> str:
     return f"{CONTAINER_WORKDIR}/{path.name}"
 
 
-def _failure_result(
-    stderr: str,
-    exit_code: int,
-    stdout: str,
-    duration: float,
-) -> ExecutionResult:
+def _failure_result(stderr: str, exit_code: int, stdout: str, duration: float) -> ExecutionResult:
     return ExecutionResult(
         success=False,
         stdout=stdout,

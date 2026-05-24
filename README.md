@@ -127,7 +127,7 @@ SNAPSCRIPT_SANDBOX_BACKEND=docker uv run python main.py \
 ## Streamlit Usage
 
 ```bash
-uv run streamlit run src/snapscript/interfaces/web.py
+uv run streamlit run app.py
 ```
 
 The Streamlit interface supports local upload, task entry, output preview, download, rate limiting, redacted errors, and metadata-only audit logging.

@@ -1,3 +1,7 @@
+'''
+Streamlit UI
+'''
+
 from __future__ import annotations
 
 from collections.abc import MutableMapping
@@ -323,11 +327,12 @@ def validate_upload_suffix(file_name: str) -> str:
 
 
 def validate_upload_size(size_or_bytes: int | bytes) -> None:
-    size = (
-        len(size_or_bytes)
-        if isinstance(size_or_bytes, bytes)
-        else size_or_bytes
-    )
+    size: int
+    if isinstance(size_or_bytes, bytes):
+        size = len(size_or_bytes)
+    else:
+        size = int(size_or_bytes)
+
     if size > MAX_UPLOAD_BYTES:
         raise ValueError("Upload is too large. Maximum size is 10 MB.")
 

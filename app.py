@@ -1,3 +1,7 @@
+'''
+Streamlit entrypoint wrapper
+'''
+
 from snapscript.interfaces.web import main
 
 

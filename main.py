@@ -1,3 +1,7 @@
+'''
+CLI entrypoint wrapper
+'''
+
 import sys
 
 from snapscript.interfaces.cli import main

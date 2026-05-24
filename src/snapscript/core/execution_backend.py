@@ -1,3 +1,12 @@
+'''
+retry_handler.run(...)
+  -> code_generator.generate(...)
+  -> safety_checker.check(...)
+  -> execution_backend.execute(...)
+      -> sandbox_executor.execute(...) # subprocess backend
+      -> docker_sandbox_executor.execute(...) # Docker backend
+'''
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -8,11 +17,14 @@ from snapscript.core.models import ExecutionResult
 
 
 def execute(
-    code: str,
-    input_path: Path,
-    output_path: Path,
+    code: str, # LLM-generated code to execute
+    input_path: Path, # input CSV/Excel file path
+    output_path: Path, # output CSV/Excel file path
     config: AppConfig | None = None,
 ) -> ExecutionResult:
+    
+    # determine which sandbox backend to use based on config, default to subprocess if not specified
+    #   default is subprocess, can be switched to docker via SNAPSCRIPT_SANDBOX_BACKEND=docker
     selected_config = config if config is not None else AppConfig()
     backend = str(getattr(selected_config, "sandbox_backend", "")).strip().lower()
 
