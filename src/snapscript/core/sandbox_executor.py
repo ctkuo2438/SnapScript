@@ -52,12 +52,12 @@ def execute(code: str, input_path: Path, output_path: Path) -> ExecutionResult:
     # create a temporary workspace for the execution, all files will be created and executed in this workspace
     with tempfile.TemporaryDirectory(prefix="snapscript_") as workspace_name:
         workspace = Path(workspace_name)
-        temp_input_path = workspace / f"input{Path(input_path).suffix}" # /workspace/input.csv
-        temp_output_path = workspace / _temp_output_name(Path(output_path)) # /workspace/input.csv
+        temp_input_path = workspace / f"input{Path(input_path).suffix}"
+        temp_output_path = workspace / _temp_output_name(Path(output_path))
 
         # copy the input file to the workspace with a temp name, so that the generated script can read from it
         shutil.copy2(input_path, temp_input_path)
-        # write the _snapscript_paths.py module with the input/output paths
+        # write the _snapscript_paths.py module with the input/output host temp paths
         _write_paths_module(workspace, temp_input_path, temp_output_path)
         # write the generated code to script.py in the workspace
         _write_script(workspace, code)
@@ -100,7 +100,7 @@ def _temp_output_name(output_path: Path) -> str:
 
 '''
 generate the following variables in _snapscript_paths.py for the script.py to use:
-INPUT_PATH = "/tmp/snapscript_abc123/input.csv"
+INPUT_PATH = "/tmp/snapscript_abc123/input.csv", host temp path
 OUTPUT_PATH = "/tmp/snapscript_abc123/output.csv"
 '''
 def _write_paths_module(workspace: Path, input_path: Path, output_path: Path) -> None:

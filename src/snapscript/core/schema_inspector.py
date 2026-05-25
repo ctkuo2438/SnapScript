@@ -99,6 +99,7 @@ def inspect(path: Path, sheet: str | None = None) -> SchemaReport:
     except Exception as exc:
         raise UnreadableFileError(f"Could not read file: {input_path}") from exc
 
+# TODO: add Multi-file schema: inspect_many(inputs: list[InputFileSpec]) -> MultiFileSchemaReport
 
 # helper functions for schema inspection, focused on reading file metadata and sample data without loading the entire dataset into memory, 
 #   to avoid performance issues with large files.

@@ -21,6 +21,7 @@ class AppConfig:
     # Execution, default is subprocess sandbox, 
     #   can be switched to docker via SNAPSCRIPT_SANDBOX_BACKEND=docker
     execution_timeout_seconds: int = 30
+    # number of retries after the initial attempt, total attempts = max_retries + 1
     max_retries: int = 2
     max_output_file_size_bytes: int = 100 * 1024 * 1024
     sandbox_backend: str = field(
