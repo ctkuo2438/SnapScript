@@ -28,6 +28,47 @@ class SchemaReport:
     sheet_names: list[str] = field(default_factory=list)
 
 
+# we need to know this path's logical name when we have multiple input files
+'''
+InputFileSpec(
+    name="orders",
+    path=Path("orders.csv"),
+)
+'''
+@dataclass
+class InputFileSpec:
+    name: str
+    path: Path
+    sheet: str | None = None
+    display_filename: str | None = None
+
+
+# we could know the name of the input file and its schema report after inspection
+'''
+NamedSchemaReport(
+    name="orders",
+    schema=orders_schema,
+)
+'''
+@dataclass
+class NamedSchemaReport:
+    name: str
+    schema: SchemaReport
+
+
+'''
+MultiFileSchemaReport(
+    files=[
+        NamedSchemaReport(name="orders", schema=orders_schema),
+        NamedSchemaReport(name="products", schema=products_schema),
+    ]
+)
+'''
+@dataclass
+class MultiFileSchemaReport:
+    files: list[NamedSchemaReport] = field(default_factory=list)
+
+
 @dataclass
 # represents the payload for prompt generation, including system and user prompts
 class PromptPayload:

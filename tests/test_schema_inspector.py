@@ -5,10 +5,11 @@ import pytest
 
 from snapscript.config import AppConfig
 from snapscript.core import schema_inspector
-from snapscript.core.models import SchemaReport
+from snapscript.core.models import InputFileSpec, MultiFileSchemaReport, SchemaReport
 from snapscript.core.schema_inspector import (
     InputFileTooLargeError,
     MissingInputFileError,
+    SchemaInspectionError,
     UnsupportedFileTypeError,
     UnreadableFileError,
 )
@@ -65,6 +66,118 @@ def test_inspect_excel_reports_sheet_names_and_selected_sheet(tmp_path: Path) ->
     assert report.columns[0].unique_count == 2
     assert report.columns[0].sample_values == ["Ada", "Grace"]
     assert report.sample_rows[0] == {"name": "Ada", "score": 10}
+
+
+def test_inspect_many_with_two_csv_files_returns_named_schema_reports() -> None:
+    report = schema_inspector.inspect_many(
+        [
+            InputFileSpec(name="orders", path=FIXTURES / "task_02_orders.csv"),
+            InputFileSpec(name="customers", path=FIXTURES / "task_01_customers.csv"),
+        ]
+    )
+
+    assert isinstance(report, MultiFileSchemaReport)
+    assert [file.name for file in report.files] == ["orders", "customers"]
+    assert report.files[0].schema.filename == "task_02_orders.csv"
+    assert report.files[1].schema.filename == "task_01_customers.csv"
+    assert [column.name for column in report.files[0].schema.columns] == [
+        "order_id",
+        "customer",
+        "amount",
+        "status",
+    ]
+
+
+def test_inspect_many_preserves_input_order() -> None:
+    report = schema_inspector.inspect_many(
+        [
+            InputFileSpec(name="customers", path=FIXTURES / "task_01_customers.csv"),
+            InputFileSpec(name="orders", path=FIXTURES / "task_02_orders.csv"),
+        ]
+    )
+
+    assert [file.name for file in report.files] == ["customers", "orders"]
+    assert [file.schema.filename for file in report.files] == [
+        "task_01_customers.csv",
+        "task_02_orders.csv",
+    ]
+
+
+def test_inspect_many_trims_whitespace_before_validation() -> None:
+    report = schema_inspector.inspect_many(
+        [
+            InputFileSpec(name=" orders ", path=FIXTURES / "task_02_orders.csv"),
+            InputFileSpec(name="\tcustomers\n", path=FIXTURES / "task_01_customers.csv"),
+        ]
+    )
+
+    assert [file.name for file in report.files] == ["orders", "customers"]
+
+
+def test_inspect_many_rejects_duplicate_logical_names() -> None:
+    with pytest.raises(SchemaInspectionError, match="Duplicate logical input name"):
+        schema_inspector.inspect_many(
+            [
+                InputFileSpec(name="orders", path=FIXTURES / "task_02_orders.csv"),
+                InputFileSpec(name=" orders ", path=FIXTURES / "task_01_customers.csv"),
+            ]
+        )
+
+
+@pytest.mark.parametrize(
+    "name",
+    ["Orders", "customer-id", "customer id", "1_orders", ""],
+)
+def test_inspect_many_rejects_invalid_logical_names(name: str) -> None:
+    with pytest.raises(SchemaInspectionError, match="Invalid logical input name"):
+        schema_inspector.inspect_many(
+            [InputFileSpec(name=name, path=FIXTURES / "task_02_orders.csv")]
+        )
+
+
+def test_inspect_many_does_not_silently_normalize_case() -> None:
+    with pytest.raises(SchemaInspectionError, match="Invalid logical input name"):
+        schema_inspector.inspect_many(
+            [InputFileSpec(name="Orders", path=FIXTURES / "task_02_orders.csv")]
+        )
+
+
+def test_inspect_many_rejects_empty_input_list() -> None:
+    with pytest.raises(SchemaInspectionError, match="At least one input file"):
+        schema_inspector.inspect_many([])
+
+
+def test_inspect_many_raises_for_unsupported_extension(tmp_path: Path) -> None:
+    text_file = tmp_path / "input.txt"
+    text_file.write_text("name\nAda\n")
+
+    with pytest.raises(UnsupportedFileTypeError):
+        schema_inspector.inspect_many([InputFileSpec(name="input", path=text_file)])
+
+
+def test_inspect_many_raises_for_missing_file(tmp_path: Path) -> None:
+    with pytest.raises(MissingInputFileError):
+        schema_inspector.inspect_many(
+            [InputFileSpec(name="missing", path=tmp_path / "missing.csv")]
+        )
+
+
+def test_inspect_many_supports_excel_paths(tmp_path: Path) -> None:
+    workbook = tmp_path / "contacts.xlsx"
+    with pd.ExcelWriter(workbook, engine="openpyxl") as writer:
+        pd.DataFrame({"name": ["Ada", "Grace"], "score": [10, 20]}).to_excel(
+            writer,
+            sheet_name="people",
+            index=False,
+        )
+
+    report = schema_inspector.inspect_many(
+        [InputFileSpec(name="contacts", path=workbook, sheet="people")]
+    )
+
+    assert report.files[0].name == "contacts"
+    assert report.files[0].schema.filename == "contacts.xlsx"
+    assert report.files[0].schema.sheet_names == ["people"]
 
 
 def test_inspect_truncates_column_names_for_prompt_safety(tmp_path: Path) -> None:

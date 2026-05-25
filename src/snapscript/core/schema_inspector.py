@@ -40,6 +40,7 @@ SchemaReport(
 from __future__ import annotations
 
 import csv
+import re
 from pathlib import Path
 from typing import Any
 
@@ -48,7 +49,13 @@ import pandas as pd
 from openpyxl import load_workbook
 
 from snapscript.config import AppConfig
-from snapscript.core.models import ColumnInfo, SchemaReport
+from snapscript.core.models import (
+    ColumnInfo,
+    InputFileSpec,
+    MultiFileSchemaReport,
+    NamedSchemaReport,
+    SchemaReport,
+)
 
 # create a SnapScript-specific error hierarchy for schema inspection issues
 # inherit from python build-in Exception class
@@ -73,6 +80,7 @@ class InputFileTooLargeError(SchemaInspectionError):
 
 
 SUPPORTED_EXTENSIONS = frozenset({".csv", ".xlsx", ".xls"})
+LOGICAL_NAME_PATTERN = re.compile(r"^[a-z][a-z0-9_]*$")
 
 
 # main entry point for schema inspection, called by the API handler after file upload, 
@@ -99,10 +107,50 @@ def inspect(path: Path, sheet: str | None = None) -> SchemaReport:
     except Exception as exc:
         raise UnreadableFileError(f"Could not read file: {input_path}") from exc
 
-# TODO: add Multi-file schema: inspect_many(inputs: list[InputFileSpec]) -> MultiFileSchemaReport
+def inspect_many(inputs: list[InputFileSpec]) -> MultiFileSchemaReport:
+    validated_inputs = _validate_input_specs(inputs)
+    files = [
+        NamedSchemaReport(
+            name=input_spec.name,
+            # reuse the existing single-file inspector for each named input file
+            schema=inspect(input_spec.path, sheet=input_spec.sheet),
+        )
+        for input_spec in validated_inputs
+    ]
+    return MultiFileSchemaReport(files=files)
+
 
 # helper functions for schema inspection, focused on reading file metadata and sample data without loading the entire dataset into memory, 
 #   to avoid performance issues with large files.
+def _validate_input_specs(inputs: list[InputFileSpec]) -> list[InputFileSpec]:
+    if not inputs:
+        raise SchemaInspectionError("At least one input file is required")
+
+    seen_names: set[str] = set()
+    validated_inputs: list[InputFileSpec] = []
+    for input_spec in inputs:
+        name = _validate_logical_name(input_spec.name)
+        if name in seen_names:
+            raise SchemaInspectionError(f"Duplicate logical input name: {name}")
+        seen_names.add(name)
+        validated_inputs.append(
+            InputFileSpec(
+                name=name,
+                path=Path(input_spec.path),
+                sheet=input_spec.sheet,
+                display_filename=input_spec.display_filename,
+            )
+        )
+    return validated_inputs
+
+
+def _validate_logical_name(name: str) -> str:
+    trimmed_name = name.strip()
+    if not LOGICAL_NAME_PATTERN.fullmatch(trimmed_name):
+        raise SchemaInspectionError(f"Invalid logical input name: {name!r}")
+    return trimmed_name
+
+
 def _validate_path(path: Path, config: AppConfig) -> None:
     if not path.exists():
         raise MissingInputFileError(f"File not found: {path}")

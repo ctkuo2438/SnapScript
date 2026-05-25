@@ -5,6 +5,9 @@ from snapscript.core.models import (
     ColumnInfo,
     ExecutionResult,
     GeneratedScript,
+    InputFileSpec,
+    MultiFileSchemaReport,
+    NamedSchemaReport,
     PromptPayload,
     SafetyResult,
     SchemaReport,
@@ -15,6 +18,9 @@ def test_all_shared_models_are_dataclasses() -> None:
     for model in (
         ColumnInfo,
         SchemaReport,
+        InputFileSpec,
+        NamedSchemaReport,
+        MultiFileSchemaReport,
         PromptPayload,
         GeneratedScript,
         SafetyResult,
@@ -54,6 +60,39 @@ def test_prompt_payload_keeps_system_and_user_prompts_separate() -> None:
         "system_prompt",
         "user_prompt",
     ]
+
+
+def test_input_file_spec_constructs_with_defaults() -> None:
+    spec = InputFileSpec(name="orders", path=Path("orders.csv"))
+
+    assert spec.name == "orders"
+    assert spec.path == Path("orders.csv")
+    assert spec.sheet is None
+    assert spec.display_filename is None
+
+
+def test_named_and_multi_file_schema_reports_preserve_input_order() -> None:
+    orders_schema = SchemaReport(
+        filename="orders.csv",
+        file_type="csv",
+        row_count=1,
+        file_size_bytes=10,
+    )
+    products_schema = SchemaReport(
+        filename="products.csv",
+        file_type="csv",
+        row_count=1,
+        file_size_bytes=10,
+    )
+    orders = NamedSchemaReport(name="orders", schema=orders_schema)
+    products = NamedSchemaReport(name="products", schema=products_schema)
+
+    report = MultiFileSchemaReport(files=[orders, products])
+
+    assert orders.name == "orders"
+    assert orders.schema is orders_schema
+    assert [file.name for file in report.files] == ["orders", "products"]
+    assert report.files[1].schema is products_schema
 
 
 def test_generation_safety_and_execution_models_hold_cli_metadata() -> None:
