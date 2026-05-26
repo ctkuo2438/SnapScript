@@ -6,7 +6,7 @@ import pandas as pd
 
 from snapscript.config import AppConfig
 from snapscript.core import docker_sandbox_executor
-from snapscript.core.models import ExecutionResult
+from snapscript.core.models import ExecutionResult, InputFileSpec
 
 
 def _write_input_csv(path: Path) -> None:
@@ -14,6 +14,15 @@ def _write_input_csv(path: Path) -> None:
         {
             "order_id": [1, 2, 3],
             "amount": [500, 1500, 2500],
+        }
+    ).to_csv(path, index=False)
+
+
+def _write_products_csv(path: Path) -> None:
+    pd.DataFrame(
+        {
+            "pid": ["p1", "p2"],
+            "product_name": ["Keyboard", "Mouse"],
         }
     ).to_csv(path, index=False)
 
@@ -132,9 +141,54 @@ def test_workspace_helpers_copy_input_and_write_paths_and_script(
         encoding="utf-8"
     )
     assert "INPUT_PATH" in paths_module
+    assert "INPUT_PATHS" in paths_module
     assert "OUTPUT_PATH" in paths_module
     assert '"/workspace/input.csv"' in paths_module
     assert '"/workspace/output.csv"' in paths_module
+    assert '{"input": INPUT_PATH}' in paths_module
+
+
+def test_workspace_helpers_copy_many_inputs_and_write_container_paths(
+    tmp_path: Path,
+) -> None:
+    orders_source = tmp_path / "source_a"
+    products_source = tmp_path / "source_b"
+    workspace = tmp_path / "workspace"
+    orders_source.mkdir()
+    products_source.mkdir()
+    workspace.mkdir()
+    orders_path = orders_source / "orders.csv"
+    products_path = products_source / "orders.csv"
+    _write_input_csv(orders_path)
+    _write_products_csv(products_path)
+
+    copied_inputs = docker_sandbox_executor._copy_inputs_to_workspace(
+        [
+            InputFileSpec(name="orders", path=orders_path),
+            InputFileSpec(name="products", path=products_path),
+        ],
+        workspace,
+    )
+    temp_output = workspace / "output.csv"
+    docker_sandbox_executor._write_paths_module(
+        workspace,
+        None,
+        temp_output,
+        copied_inputs,
+    )
+
+    assert copied_inputs["orders"].name.startswith("input_0_orders_")
+    assert copied_inputs["products"].name.startswith("input_1_products_")
+    assert copied_inputs["orders"].name != copied_inputs["products"].name
+    paths_module = (workspace / "_snapscript_paths.py").read_text(
+        encoding="utf-8"
+    )
+    assert "INPUT_PATH = None" in paths_module
+    assert '"/workspace/' in paths_module
+    assert '"orders"' in paths_module
+    assert '"products"' in paths_module
+    assert str(orders_source) not in paths_module
+    assert str(products_source) not in paths_module
 
 
 def test_execute_invokes_mocked_docker_and_copies_valid_csv_output(
@@ -211,6 +265,59 @@ def test_execute_prepares_workspace_permissions_before_docker_run(
     )
 
     assert result.success is True
+
+
+def test_execute_many_invokes_mocked_docker_with_named_input_paths(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    orders_path = tmp_path / "orders.csv"
+    products_path = tmp_path / "products.csv"
+    output_path = tmp_path / "joined.csv"
+    pd.DataFrame(
+        {
+            "order_id": [1, 2, 3],
+            "pid": ["p1", "p2", "p3"],
+            "amount": [100, 200, 300],
+        }
+    ).to_csv(orders_path, index=False)
+    _write_products_csv(products_path)
+    captured_paths_module: list[str] = []
+    commands: list[list[str]] = []
+
+    def fake_run(command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        commands.append(command)
+        workspace = _workspace_from_command(command)
+        paths_module = (workspace / "_snapscript_paths.py").read_text(
+            encoding="utf-8"
+        )
+        captured_paths_module.append(paths_module)
+        assert "INPUT_PATH = None" in paths_module
+        assert '"/workspace/input_0_orders_orders.csv"' in paths_module
+        assert '"/workspace/input_1_products_products.csv"' in paths_module
+        pd.DataFrame(
+            {"order_id": [1, 2], "pid": ["p1", "p2"], "product_name": ["Keyboard", "Mouse"]}
+        ).to_csv(workspace / "output.csv", index=False)
+        return subprocess.CompletedProcess(command, returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(docker_sandbox_executor.subprocess, "run", fake_run)
+
+    result = docker_sandbox_executor.execute_many(
+        "print('container run')\n",
+        [
+            InputFileSpec(name="orders", path=orders_path),
+            InputFileSpec(name="products", path=products_path),
+        ],
+        output_path,
+    )
+
+    assert result.success is True
+    assert len(commands) == 1
+    assert commands[0].count("-v") == 1
+    assert output_path.exists()
+    output = pd.read_csv(output_path)
+    assert output["order_id"].tolist() == [1, 2]
+    assert str(tmp_path) not in captured_paths_module[0]
 
 
 def test_run_docker_uses_configured_timeout(

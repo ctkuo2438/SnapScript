@@ -2,8 +2,6 @@
 schema_inspector.inspect(...)
   -> prompt_builder.build(...)
   -> retry_handler.run(...)
-      -> code_generator.generate(...)
-      -> safety_checker.check(...)
       -> execution_backend.execute(...)
           -> sandbox_executor.execute(...) # subprocess backend
           -> docker_sandbox_executor.execute(...) # Docker backend
@@ -14,6 +12,7 @@ when the config is SNAPSCRIPT_SANDBOX_BACKEND=docker
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import subprocess
 import tempfile
@@ -23,7 +22,7 @@ from pathlib import Path
 import pandas as pd
 
 from snapscript.config import AppConfig
-from snapscript.core.models import ExecutionResult
+from snapscript.core.models import ExecutionResult, InputFileSpec
 
 
 SCRIPT_NAME = "script.py"
@@ -31,18 +30,42 @@ PATHS_MODULE_NAME = "_snapscript_paths.py"
 # DEFAULT_DOCKER_IMAGE = "snapscript-sandbox:local"
 CONTAINER_WORKDIR = "/workspace"
 DOCKER_PIDS_LIMIT = "128"
+SAFE_FILENAME_PATTERN = re.compile(r"[^A-Za-z0-9._-]+")
 
 
 def execute(code: str, input_path: Path, output_path: Path) -> ExecutionResult:
+    input_spec = InputFileSpec(name="input", path=Path(input_path))
+    return _execute_with_inputs(code, [input_spec], Path(output_path), single_file=True)
+
+
+def execute_many(
+    code: str,
+    inputs: list[InputFileSpec],
+    output_path: Path,
+) -> ExecutionResult:
+    return _execute_with_inputs(code, inputs, Path(output_path), single_file=False)
+
+
+def _execute_with_inputs(
+    code: str,
+    inputs: list[InputFileSpec],
+    output_path: Path,
+    single_file: bool,
+) -> ExecutionResult:
     config = AppConfig()
     start_time = time.monotonic()
 
     with tempfile.TemporaryDirectory(prefix="snapscript_docker_") as workspace_name:
         workspace = Path(workspace_name).resolve()
-        temp_input_path = _copy_input_to_workspace(input_path, workspace)
-        temp_output_path = workspace / _temp_output_name(Path(output_path))
+        if single_file:
+            temp_input_path = _copy_input_to_workspace(inputs[0].path, workspace)
+            copied_inputs = {"input": temp_input_path}
+        else:
+            temp_input_path = None
+            copied_inputs = _copy_inputs_to_workspace(inputs, workspace)
+        temp_output_path = workspace / _temp_output_name(output_path)
 
-        _write_paths_module(workspace, temp_input_path, temp_output_path) # container paths
+        _write_paths_module(workspace, temp_input_path, temp_output_path, copied_inputs) # container paths
         _write_script(workspace, code)
         # chmod workspace/files for non-root user in docker to read/write/execute
         _prepare_workspace_permissions(workspace)
@@ -82,12 +105,52 @@ def _copy_input_to_workspace(input_path: Path, workspace: Path) -> Path:
     return temp_input_path
 
 
-def _write_paths_module(workspace: Path, input_path: Path, output_path: Path) -> None:
+def _copy_inputs_to_workspace(
+    inputs: list[InputFileSpec],
+    workspace: Path,
+) -> dict[str, Path]:
+    copied_inputs: dict[str, Path] = {}
+    for index, input_spec in enumerate(inputs):
+        temp_input_path = workspace / _safe_input_filename(index, input_spec)
+        shutil.copy2(input_spec.path, temp_input_path)
+        copied_inputs[input_spec.name] = temp_input_path
+    return copied_inputs
+
+
+def _write_paths_module(
+    workspace: Path,
+    input_path: Path | None,
+    output_path: Path,
+    input_paths: dict[str, Path] | None = None,
+) -> None:
+    if input_path is None:
+        input_path_content = "None"
+        input_paths_content = json.dumps(
+            {
+                name: _container_path(path)
+                for name, path in (input_paths or {}).items()
+            },
+            sort_keys=True,
+        )
+    else:
+        input_path_content = json.dumps(_container_path(input_path))
+        input_paths_content = '{"input": INPUT_PATH}'
+
     content = (
-        f"INPUT_PATH = {json.dumps(_container_path(input_path))}\n"
+        f"INPUT_PATH = {input_path_content}\n"
+        f"INPUT_PATHS = {input_paths_content}\n"
         f"OUTPUT_PATH = {json.dumps(_container_path(output_path))}\n"
     )
     (workspace / PATHS_MODULE_NAME).write_text(content, encoding="utf-8")
+
+
+def _safe_input_filename(index: int, input_spec: InputFileSpec) -> str:
+    source_name = Path(input_spec.display_filename or input_spec.path.name).name
+    safe_source_name = SAFE_FILENAME_PATTERN.sub("_", source_name).strip("._")
+    if not safe_source_name:
+        safe_source_name = f"input{Path(input_spec.path).suffix}"
+    safe_logical_name = SAFE_FILENAME_PATTERN.sub("_", input_spec.name).strip("._")
+    return f"input_{index}_{safe_logical_name}_{safe_source_name}"
 
 
 def _write_script(workspace: Path, code: str) -> None:

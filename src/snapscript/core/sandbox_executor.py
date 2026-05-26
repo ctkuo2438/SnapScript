@@ -25,6 +25,7 @@ WorkFLow:
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import subprocess
 import sys
@@ -35,7 +36,7 @@ from pathlib import Path
 import pandas as pd
 
 from snapscript.config import AppConfig
-from snapscript.core.models import ExecutionResult
+from snapscript.core.models import ExecutionResult, InputFileSpec
 
 
 SCRIPT_NAME = "script.py"
@@ -43,22 +44,40 @@ SCRIPT_NAME = "script.py"
 # the module name for snapscript to write the input/output paths into, 
 #   so that the generated script.py can import and use these paths
 PATHS_MODULE_NAME = "_snapscript_paths.py"
+SAFE_FILENAME_PATTERN = re.compile(r"[^A-Za-z0-9._-]+")
 
 
 def execute(code: str, input_path: Path, output_path: Path) -> ExecutionResult:
+    input_spec = InputFileSpec(name="input", path=Path(input_path))
+    return _execute_with_inputs(code, [input_spec], Path(output_path), single_file=True)
+
+
+def execute_many(
+    code: str,
+    inputs: list[InputFileSpec],
+    output_path: Path,
+) -> ExecutionResult:
+    return _execute_with_inputs(code, inputs, Path(output_path), single_file=False)
+
+
+def _execute_with_inputs(
+    code: str,
+    inputs: list[InputFileSpec],
+    output_path: Path,
+    single_file: bool,
+) -> ExecutionResult:
     config = AppConfig()
     start_time = time.monotonic() # record the start time for execution time calculation
 
     # create a temporary workspace for the execution, all files will be created and executed in this workspace
     with tempfile.TemporaryDirectory(prefix="snapscript_") as workspace_name:
         workspace = Path(workspace_name)
-        temp_input_path = workspace / f"input{Path(input_path).suffix}"
-        temp_output_path = workspace / _temp_output_name(Path(output_path))
+        copied_inputs = _copy_inputs_to_workspace(inputs, workspace)
+        temp_input_path = copied_inputs["input"] if single_file else None
+        temp_output_path = workspace / _temp_output_name(output_path)
 
-        # copy the input file to the workspace with a temp name, so that the generated script can read from it
-        shutil.copy2(input_path, temp_input_path)
         # write the _snapscript_paths.py module with the input/output host temp paths
-        _write_paths_module(workspace, temp_input_path, temp_output_path)
+        _write_paths_module(workspace, temp_input_path, temp_output_path, copied_inputs)
         # write the generated code to script.py in the workspace
         _write_script(workspace, code)
 
@@ -76,7 +95,7 @@ def execute(code: str, input_path: Path, output_path: Path) -> ExecutionResult:
                 duration=_duration(start_time),
             )
 
-        requested_output_path = Path(output_path)
+        requested_output_path = output_path
         requested_output_path.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(temp_output_path, requested_output_path)
 
@@ -101,15 +120,53 @@ def _temp_output_name(output_path: Path) -> str:
 '''
 generate the following variables in _snapscript_paths.py for the script.py to use:
 INPUT_PATH = "/tmp/snapscript_abc123/input.csv", host temp path
+INPUT_PATHS = {"input": INPUT_PATH}
 OUTPUT_PATH = "/tmp/snapscript_abc123/output.csv"
 '''
-def _write_paths_module(workspace: Path, input_path: Path, output_path: Path) -> None:
+def _write_paths_module(
+    workspace: Path,
+    input_path: Path | None,
+    output_path: Path,
+    input_paths: dict[str, Path],
+) -> None:
+    if input_path is None:
+        input_path_content = "None"
+        input_paths_content = json.dumps(
+            {name: str(path) for name, path in input_paths.items()},
+            sort_keys=True,
+        )
+    else:
+        input_path_content = json.dumps(str(input_path))
+        input_paths_content = '{"input": INPUT_PATH}'
+
     content = (
-        f"INPUT_PATH = {json.dumps(str(input_path))}\n"
+        f"INPUT_PATH = {input_path_content}\n"
+        f"INPUT_PATHS = {input_paths_content}\n"
         f"OUTPUT_PATH = {json.dumps(str(output_path))}\n"
     )
     # write the _snapscript_paths.py module in the workspace
     (workspace / PATHS_MODULE_NAME).write_text(content, encoding="utf-8")
+
+
+def _copy_inputs_to_workspace(
+    inputs: list[InputFileSpec],
+    workspace: Path,
+) -> dict[str, Path]:
+    copied_inputs: dict[str, Path] = {}
+    for index, input_spec in enumerate(inputs):
+        temp_input_path = workspace / _safe_input_filename(index, input_spec)
+        shutil.copy2(input_spec.path, temp_input_path)
+        copied_inputs[input_spec.name] = temp_input_path
+    return copied_inputs
+
+
+def _safe_input_filename(index: int, input_spec: InputFileSpec) -> str:
+    source_name = Path(input_spec.display_filename or input_spec.path.name).name
+    safe_source_name = SAFE_FILENAME_PATTERN.sub("_", source_name).strip("._")
+    if not safe_source_name:
+        safe_source_name = f"input{Path(input_spec.path).suffix}"
+    safe_logical_name = SAFE_FILENAME_PATTERN.sub("_", input_spec.name).strip("._")
+    return f"input_{index}_{safe_logical_name}_{safe_source_name}"
 
 
 # write the generated code to script.py in the workspace
