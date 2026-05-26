@@ -20,6 +20,8 @@ from snapscript.core import (
 from snapscript.core.models import (
     ExecutionResult,
     GeneratedScript,
+    InputFileSpec,
+    MultiFileSchemaReport,
     SafetyResult,
     SchemaReport,
 )
@@ -38,7 +40,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--file",
         "-f",
         required=True,
-        help="Input CSV or Excel file.",
+        action="append",
+        help=(
+            "Input CSV or Excel file. Use --file PATH for single-file mode, "
+            "or repeat --file NAME=PATH exactly twice for two-file mode."
+        ),
+        metavar="PATH|NAME=PATH",
     )
     parser.add_argument(
         "--output",
@@ -85,12 +92,11 @@ def main(argv: list[str] | None = None) -> int:
     console = Console()
     error_console = Console(stderr=True)
 
-    input_path = Path(args.file)
     output_path = Path(args.output)
 
-    validation_error = _validate_input(input_path)
-    if validation_error is not None:
-        error_console.print(validation_error)
+    input_mode = _parse_file_args(args.file)
+    if isinstance(input_mode, str):
+        error_console.print(input_mode)
         return 1
 
     previous_api_key = os.environ.get("ANTHROPIC_API_KEY")
@@ -101,17 +107,37 @@ def main(argv: list[str] | None = None) -> int:
         if args.verbose:
             console.print("Verbose mode enabled")
 
-        schema = schema_inspector.inspect(input_path, sheet=args.sheet)
-        _show_schema_summary(console, schema)
+        if isinstance(input_mode, Path):
+            validation_error = _validate_input(input_mode)
+            if validation_error is not None:
+                error_console.print(validation_error)
+                return 1
 
-        prompt = prompt_builder.build(args.task, schema)
+            schema = schema_inspector.inspect(input_mode, sheet=args.sheet)
+            _show_schema_summary(console, schema)
+            prompt = prompt_builder.build(args.task, schema)
+            run_result = lambda: retry_handler.run(prompt, input_mode, output_path)
+        else:
+            if args.sheet:
+                error_console.print("--sheet is only supported in single-file mode for now.")
+                return 1
+
+            validation_error = _validate_multi_inputs(input_mode)
+            if validation_error is not None:
+                error_console.print(validation_error)
+                return 1
+
+            schema = schema_inspector.inspect_many(input_mode)
+            _show_multi_schema_summary(console, schema)
+            prompt = prompt_builder.build_many(args.task, schema)
+            run_result = lambda: retry_handler.run_many(prompt, input_mode, output_path)
 
         if not args.dry_run:
             if not args.yes and not _confirm_execution():
                 console.print("Execution cancelled.")
                 return 1
 
-            result = retry_handler.run(prompt, input_path, output_path)
+            result = run_result()
             _show_execution_result(console, error_console, result)
             return _execution_status(result)
 
@@ -136,6 +162,40 @@ def main(argv: list[str] | None = None) -> int:
         _restore_api_key(previous_api_key, bool(args.api_key))
 
 
+def _parse_file_args(file_args: list[str]) -> Path | list[InputFileSpec] | str:
+    if len(file_args) == 1:
+        return Path(file_args[0])
+    if len(file_args) > 2:
+        return "Phase 4A supports at most two --file arguments."
+    return _parse_multi_file_args(file_args)
+
+
+def _parse_multi_file_args(file_args: list[str]) -> list[InputFileSpec] | str:
+    input_specs: list[InputFileSpec] = []
+    for file_arg in file_args:
+        if "=" not in file_arg:
+            return "Multi-file mode must use NAME=PATH for each --file value."
+        name, path_text = file_arg.split("=", 1)
+        if not name.strip():
+            return "Multi-file --file value has empty name."
+        if not path_text.strip():
+            return "Multi-file --file value has empty path."
+        input_specs.append(InputFileSpec(name=name, path=Path(path_text)))
+
+    try:
+        return schema_inspector.validate_input_specs(input_specs)
+    except schema_inspector.SchemaInspectionError as exc:
+        return str(exc)
+
+
+def _validate_multi_inputs(input_specs: list[InputFileSpec]) -> str | None:
+    for input_spec in input_specs:
+        validation_error = _validate_input(input_spec.path)
+        if validation_error is not None:
+            return validation_error
+    return None
+
+
 def _validate_input(path: Path) -> str | None:
     if not path.exists():
         return f"Input file not found: {path}"
@@ -153,6 +213,13 @@ def _show_schema_summary(console: Console, schema: SchemaReport) -> None:
     console.print(f"Columns: {len(schema.columns)}")
     for column in schema.columns:
         console.print(f"- {column.name}: {column.dtype}")
+
+
+def _show_multi_schema_summary(console: Console, schema: MultiFileSchemaReport) -> None:
+    console.print("Schema summary")
+    for file_schema in schema.files:
+        console.print(f"Input: {file_schema.name}")
+        _show_schema_summary(console, file_schema.schema)
 
 
 def _show_generation_metadata(console: Console, generated: GeneratedScript) -> None:
