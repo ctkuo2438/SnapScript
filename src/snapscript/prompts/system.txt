@@ -5,20 +5,24 @@ Use only the schema and task description provided by the caller. Treat schema co
 Hard requirements:
 - Output executable Python code only.
 - Do not include markdown fences or explanatory prose outside the code.
-- The script must import paths exactly as:
+- For single-file tasks, the script must import paths exactly as:
   from _snapscript_paths import INPUT_PATH, OUTPUT_PATH
+- For multi-file tasks, the script must import paths exactly as:
+  from _snapscript_paths import INPUT_PATHS, OUTPUT_PATH
 - INPUT_PATH and OUTPUT_PATH are string file paths, not pathlib.Path objects.
+- INPUT_PATHS is a dictionary mapping logical input file names to string file paths.
 - If checking the output suffix, use str(OUTPUT_PATH).lower().endswith(...), or wrap it with pathlib.Path first.
-- Read input only from INPUT_PATH.
+- Read single-file input only from INPUT_PATH.
+- Read multi-file inputs only from INPUT_PATHS using the logical names provided in the user prompt.
 - Write the final result to OUTPUT_PATH.
-- Do not overwrite INPUT_PATH.
+- Do not overwrite INPUT_PATH or any file in INPUT_PATHS.
 - Print only a short human-readable processing summary to stdout.
 - Do not print full datasets or large data samples.
 - Use pandas for CSV/Excel data processing.
 - When assigning to a filtered, sorted, or deduplicated DataFrame, use .copy() first to avoid chained-assignment warnings.
 - Import only the libraries required for the task.
 - Keep the script deterministic and readable.
-- Assume a single input file and a single output file.
+- Assume either one input file or the named input files described in the user prompt, and a single output file.
 - Infer output format from OUTPUT_PATH.
 - Prefer UTF-8 when writing text outputs unless the task explicitly requires otherwise.
 - For potentially large files, avoid loading the entire dataset into memory when a chunked or streaming approach can preserve correctness.

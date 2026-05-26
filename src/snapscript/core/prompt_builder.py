@@ -19,7 +19,13 @@ from pathlib import Path, PureWindowsPath
 from typing import Any
 
 from snapscript.config import AppConfig
-from snapscript.core.models import ColumnInfo, PromptPayload, SchemaReport
+from snapscript.core.models import (
+    ColumnInfo,
+    MultiFileSchemaReport,
+    NamedSchemaReport,
+    PromptPayload,
+    SchemaReport,
+)
 
 # parents[0] is "core" folder, so parents[1] is the root "snapscript" folder
 PROMPT_DIR = Path(__file__).resolve().parents[1] / "prompts"
@@ -38,6 +44,23 @@ def build(task_description: str, schema: SchemaReport) -> PromptPayload:
         # remove the sample rows and column sample values from the schema to reduce tokens
         schema_data = _truncate_schema_samples(schema_data)
         user_prompt = _build_user_prompt(task_description, schema_data)
+
+    return PromptPayload(
+        system_prompt=system_prompt,
+        user_prompt=user_prompt,
+    )
+
+# similar to build(), but for multiple files, the user prompt will include multiple file schemas 
+#   and instructions to use INPUT_PATHS with logical names instead of hardcoding file paths
+def build_many(task_description: str, multi_schema: MultiFileSchemaReport) -> PromptPayload:
+    config = AppConfig()
+    system_prompt = _load_system_prompt()
+    schema_data = _multi_schema_to_prompt_data(multi_schema)
+    user_prompt = _build_multi_file_user_prompt(task_description, schema_data)
+
+    if _estimate_tokens(system_prompt + user_prompt) > config.max_prompt_tokens:
+        schema_data = _truncate_multi_schema_samples(schema_data)
+        user_prompt = _build_multi_file_user_prompt(task_description, schema_data)
 
     return PromptPayload(
         system_prompt=system_prompt,
@@ -69,6 +92,49 @@ def _build_user_prompt(task_description: str, schema_data: dict[str, Any]) -> st
     )
 
 
+# for multiple files, the user prompt will include multiple file schemas and 
+#   instructions to use INPUT_PATHS with logical names instead of hardcoding file paths
+def _build_multi_file_user_prompt(task_description: str, schema_data: list[dict[str, Any]]) -> str:
+    file_sections = "\n".join(_build_file_schema_section(file_schema) for file_schema in schema_data)
+    input_path_references = ", ".join(
+        f'INPUT_PATHS[{json.dumps(file_schema["logical_name"])}]'
+        for file_schema in schema_data
+    )
+    return (
+        "## Input files information\n"
+        "<schemas>\n"
+        f"{file_sections}\n"
+        "</schemas>\n\n"
+        "## Task description\n"
+        f"{task_description.strip()}\n\n"
+        "## Path requirements\n"
+        "Read input files by using the INPUT_PATHS dictionary with the "
+        f"logical names provided above: {input_path_references}. "
+        "Do not hardcode file paths. Do not use original uploaded paths. "
+        "Write exactly one primary output file to OUTPUT_PATH. Infer the "
+        "output format from OUTPUT_PATH.\n\n"
+        "## Join and merge guidance\n"
+        'When the task asks for an inner join, use pandas merge how="inner". '
+        'When the task asks for a left join or to keep all rows from the first file, use how="left". '
+        'When the task asks for a right join or to keep all rows from the second file, use how="right". '
+        'When the task asks for an outer join or to keep all rows from both files, use how="outer". '
+        "Interpret the user's task and generate the pandas code; do not rely "
+        "on SnapScript to parse join keywords."
+    )
+
+
+def _build_file_schema_section(file_schema: dict[str, Any]) -> str:
+    logical_name = _escape_xml_attribute(str(file_schema["logical_name"]))
+    schema_json = _escape_schema_json(
+        json.dumps(file_schema, indent=2, ensure_ascii=False, default=str)
+    )
+    return (
+        f'<file name="{logical_name}">\n'
+        f"{schema_json}\n"
+        "</file>"
+    )
+
+
 # convert the SchemaReport into a structured format that can be included in the user prompt
 def _schema_to_prompt_data(schema: SchemaReport) -> dict[str, Any]:
     return {
@@ -81,6 +147,23 @@ def _schema_to_prompt_data(schema: SchemaReport) -> dict[str, Any]:
         "columns": [_column_to_prompt_data(column) for column in schema.columns],
         "sample_rows": deepcopy(schema.sample_rows),
     }
+
+
+def _multi_schema_to_prompt_data(
+    multi_schema: MultiFileSchemaReport,
+) -> list[dict[str, Any]]:
+    return [
+        _named_schema_to_prompt_data(file_schema)
+        for file_schema in multi_schema.files
+    ]
+
+
+def _named_schema_to_prompt_data(
+    file_schema: NamedSchemaReport,
+) -> dict[str, Any]:
+    schema_data = _schema_to_prompt_data(file_schema.schema)
+    schema_data["logical_name"] = file_schema.name
+    return schema_data
 
 
 # input: ColumnInfo
@@ -108,6 +191,12 @@ def _truncate_schema_samples(schema_data: dict[str, Any]) -> dict[str, Any]:
     return truncated
 
 
+def _truncate_multi_schema_samples(
+    schema_data: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    return [_truncate_schema_samples(file_schema) for file_schema in schema_data]
+
+
 # roughly estimate the number of tokens, 1 token ≈ 4 characters
 def _estimate_tokens(text: str) -> int:
     return max(1, (len(text) + 3) // 4)
@@ -117,6 +206,17 @@ def _estimate_tokens(text: str) -> int:
 #   \u003c/schema\u003e instead of </schema>
 def _escape_schema_json(schema_json: str) -> str:
     return schema_json.replace("<", "\\u003c").replace(">", "\\u003e")
+
+
+# since the prompt use <file name="..."> XML-like format, 
+#   so, we need to escape attribute values to avoid breaking the prompt formatting
+def _escape_xml_attribute(value: str) -> str:
+    return (
+        value.replace("&", "&amp;")
+        .replace('"', "&quot;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+    )
 
 
 # /Users/zhenting/Desktop/orders.csv -> orders.csv
