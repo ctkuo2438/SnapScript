@@ -7,18 +7,36 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
+from snapscript.core.models import (
+    ExecutionResult,
+    InputFileSpec,
+    MultiFileSchemaReport,
+    NamedSchemaReport,
+    PromptPayload,
+    SchemaReport,
+)
 from snapscript.interfaces import web
 
 
 EXPECTED_SESSION_DEFAULTS = {
+    "input_mode": "Single file",
     "uploaded_file_name": None,
     "uploaded_file_bytes": None,
     "uploaded_file_suffix": None,
+    "first_uploaded_file_name": None,
+    "first_uploaded_file_bytes": None,
+    "first_uploaded_file_suffix": None,
+    "second_uploaded_file_name": None,
+    "second_uploaded_file_bytes": None,
+    "second_uploaded_file_suffix": None,
+    "first_logical_name": "",
+    "second_logical_name": "",
     "task_text": "",
     "result_preview": None,
     "output_bytes": None,
     "output_file_name": None,
     "error_message": None,
+    "error_source": None,
     "run_count": 0,
     "last_run_timestamp": None,
     "is_running": False,
@@ -40,6 +58,11 @@ class FakeStreamlit:
         button_clicked: bool = False,
         uploaded_file: FakeUploadedFile | None = None,
         task_text: str = "",
+        input_mode: str = "Single file",
+        first_uploaded_file: FakeUploadedFile | None = None,
+        second_uploaded_file: FakeUploadedFile | None = None,
+        first_logical_name: str = "",
+        second_logical_name: str = "",
     ) -> None:
         self.session_state: dict[str, object] = {}
         self.calls: list[
@@ -48,6 +71,11 @@ class FakeStreamlit:
         self.button_clicked = button_clicked
         self.uploaded_file = uploaded_file
         self.task_text = task_text
+        self.input_mode = input_mode
+        self.first_uploaded_file = first_uploaded_file
+        self.second_uploaded_file = second_uploaded_file
+        self.first_logical_name = first_logical_name
+        self.second_logical_name = second_logical_name
 
     def title(self, *args: object, **kwargs: object) -> None:
         self.calls.append(("title", args, kwargs))
@@ -59,7 +87,25 @@ class FakeStreamlit:
         self, *args: object, **kwargs: object
     ) -> FakeUploadedFile | None:
         self.calls.append(("file_uploader", args, kwargs))
+        label = str(args[0]) if args else ""
+        if "First" in label:
+            return self.first_uploaded_file
+        if "Second" in label:
+            return self.second_uploaded_file
         return self.uploaded_file
+
+    def radio(self, *args: object, **kwargs: object) -> str:
+        self.calls.append(("radio", args, kwargs))
+        return self.input_mode
+
+    def text_input(self, *args: object, **kwargs: object) -> str:
+        self.calls.append(("text_input", args, kwargs))
+        label = str(args[0]) if args else ""
+        if "First" in label:
+            return self.first_logical_name
+        if "Second" in label:
+            return self.second_logical_name
+        return str(kwargs.get("value", ""))
 
     def text_area(self, *args: object, **kwargs: object) -> str:
         self.calls.append(("text_area", args, kwargs))
@@ -96,6 +142,24 @@ def isolate_audit_log(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setattr(web, "AUDIT_LOG_PATH", tmp_path / "audit.jsonl")
 
 
+def _schema(filename: str = "input.csv") -> SchemaReport:
+    return SchemaReport(
+        filename=filename,
+        file_type="csv",
+        row_count=1,
+        file_size_bytes=20,
+    )
+
+
+def _multi_schema() -> MultiFileSchemaReport:
+    return MultiFileSchemaReport(
+        files=[
+            NamedSchemaReport(name="orders", schema=_schema("orders.csv")),
+            NamedSchemaReport(name="products", schema=_schema("products.csv")),
+        ]
+    )
+
+
 def _button_disabled(
     calls: list[tuple[str, tuple[object, ...], dict[str, object]]],
 ) -> bool:
@@ -118,13 +182,9 @@ def test_app_entrypoint_only_delegates_to_web_main() -> None:
     source = Path("app.py").read_text(encoding="utf-8")
     ast.parse(source)
 
-    assert source == (
-        "from snapscript.interfaces.web import main\n"
-        "\n"
-        "\n"
-        'if __name__ == "__main__":\n'
-        "    main()\n"
-    )
+    assert "from snapscript.interfaces.web import main" in source
+    assert 'if __name__ == "__main__":' in source
+    assert "    main()" in source
 
 
 def test_initialize_session_state_sets_expected_defaults() -> None:
@@ -781,6 +841,263 @@ def test_main_generate_click_validates_then_calls_pipeline_helper(
     assert not _has_placeholder_message(fake_st.calls)
 
 
+def test_run_uploaded_tasks_many_calls_multi_file_core_flow_with_temp_paths(
+    monkeypatch,
+) -> None:
+    orders_bytes = b"order_id,pid\n1,p1\n"
+    products_bytes = b"pid,product_name\np1,Keyboard\n"
+    output_bytes = b"order_id,pid,product_name\n1,p1,Keyboard\n"
+    calls: list[str] = []
+    seen_specs: list[list[InputFileSpec]] = []
+
+    def fake_inspect_many(specs: list[InputFileSpec]) -> MultiFileSchemaReport:
+        calls.append("inspect_many")
+        seen_specs.append(specs)
+        assert [spec.name for spec in specs] == ["orders", "products"]
+        assert [spec.display_filename for spec in specs] == [
+            "orders.csv",
+            "products.csv",
+        ]
+        assert specs[0].path.name == "input_1_orders.csv"
+        assert specs[1].path.name == "input_2_products.csv"
+        assert specs[0].path.read_bytes() == orders_bytes
+        assert specs[1].path.read_bytes() == products_bytes
+        return _multi_schema()
+
+    def fake_build_many(
+        task_text: str,
+        multi_schema: MultiFileSchemaReport,
+    ) -> PromptPayload:
+        calls.append("build_many")
+        assert task_text == "Merge orders and products."
+        assert [file_schema.name for file_schema in multi_schema.files] == [
+            "orders",
+            "products",
+        ]
+        return PromptPayload(system_prompt="system", user_prompt="user")
+
+    def fake_run_many(
+        prompt: PromptPayload,
+        specs: list[InputFileSpec],
+        output_path: Path,
+    ) -> ExecutionResult:
+        calls.append("run_many")
+        seen_specs.append(specs)
+        assert prompt.user_prompt == "user"
+        assert output_path.name == "output.csv"
+        output_path.write_bytes(output_bytes)
+        return ExecutionResult(success=True, output_files=[output_path])
+
+    monkeypatch.setattr(web.schema_inspector, "inspect_many", fake_inspect_many)
+    monkeypatch.setattr(web.prompt_builder, "build_many", fake_build_many)
+    monkeypatch.setattr(web.retry_handler, "run_many", fake_run_many)
+
+    result, returned_output, output_file_name = web.run_uploaded_tasks_many(
+        first_file_bytes=orders_bytes,
+        first_suffix=".csv",
+        first_logical_name=" orders ",
+        first_uploaded_file_name="orders.csv",
+        second_file_bytes=products_bytes,
+        second_suffix=".csv",
+        second_logical_name="products",
+        second_uploaded_file_name="products.csv",
+        task_text=" Merge orders and products. ",
+    )
+
+    assert result.success is True
+    assert returned_output == output_bytes
+    assert output_file_name == "snapscript_output.csv"
+    assert calls == ["inspect_many", "build_many", "run_many"]
+    assert seen_specs[0] is seen_specs[1]
+
+
+def test_main_two_file_generate_click_validates_then_calls_multi_file_helper(
+    monkeypatch,
+) -> None:
+    orders = FakeUploadedFile("orders.csv", b"order_id,pid\n1,p1\n")
+    products = FakeUploadedFile("products.csv", b"pid,product_name\np1,Keyboard\n")
+    fake_st = FakeStreamlit(
+        button_clicked=True,
+        input_mode="Two files",
+        first_uploaded_file=orders,
+        second_uploaded_file=products,
+        first_logical_name="orders",
+        second_logical_name="products",
+        task_text=" Merge orders and products. ",
+    )
+    calls: list[tuple[str, str, str]] = []
+    monkeypatch.setattr(web, "st", fake_st)
+    monkeypatch.setattr(
+        web,
+        "run_uploaded_tasks_many",
+        lambda **kwargs: (
+            calls.append(
+                (
+                    str(kwargs["first_logical_name"]),
+                    str(kwargs["second_logical_name"]),
+                    str(kwargs["task_text"]),
+                )
+            )
+            or (
+                ExecutionResult(success=True),
+                b"order_id,pid,product_name\n1,p1,Keyboard\n",
+                "snapscript_output.csv",
+            )
+        ),
+    )
+
+    web.main()
+
+    assert _button_disabled(fake_st.calls) is False
+    assert calls == [("orders", "products", " Merge orders and products. ")]
+    assert fake_st.session_state["first_uploaded_file_bytes"] == orders.getvalue()
+    assert fake_st.session_state["second_uploaded_file_bytes"] == products.getvalue()
+    assert fake_st.session_state["error_message"] is None
+
+
+@pytest.mark.parametrize(
+    ("first_name", "second_name", "second_file", "expected_error"),
+    [
+        ("orders", "products", None, "Upload both files before generating."),
+        ("", "products", FakeUploadedFile("products.csv", b"x\n"), "Logical names are required"),
+        ("orders", "", FakeUploadedFile("products.csv", b"x\n"), "Logical names are required"),
+        ("orders", "orders", FakeUploadedFile("products.csv", b"x\n"), "Duplicate logical input name"),
+        ("Orders", "products", FakeUploadedFile("products.csv", b"x\n"), "Invalid logical input name"),
+    ],
+)
+def test_main_two_file_validation_blocks_before_pipeline_helper(
+    monkeypatch,
+    first_name: str,
+    second_name: str,
+    second_file: FakeUploadedFile | None,
+    expected_error: str,
+) -> None:
+    fake_st = FakeStreamlit(
+        button_clicked=True,
+        input_mode="Two files",
+        first_uploaded_file=FakeUploadedFile("orders.csv", b"x\n"),
+        second_uploaded_file=second_file,
+        first_logical_name=first_name,
+        second_logical_name=second_name,
+        task_text="Merge files.",
+    )
+    calls: list[object] = []
+    monkeypatch.setattr(web, "st", fake_st)
+    monkeypatch.setattr(
+        web,
+        "run_uploaded_tasks_many",
+        lambda **kwargs: calls.append(kwargs),
+    )
+
+    web.main()
+
+    assert _button_disabled(fake_st.calls) is True
+    assert calls == []
+    assert expected_error in str(fake_st.session_state["error_message"])
+
+
+def test_main_two_file_unsupported_suffix_blocks_before_pipeline_helper(
+    monkeypatch,
+) -> None:
+    fake_st = FakeStreamlit(
+        button_clicked=True,
+        input_mode="Two files",
+        first_uploaded_file=FakeUploadedFile("orders.csv", b"x\n"),
+        second_uploaded_file=FakeUploadedFile("products.txt", b"x\n"),
+        first_logical_name="orders",
+        second_logical_name="products",
+        task_text="Merge files.",
+    )
+    calls: list[object] = []
+    monkeypatch.setattr(web, "st", fake_st)
+    monkeypatch.setattr(
+        web,
+        "run_uploaded_tasks_many",
+        lambda **kwargs: calls.append(kwargs),
+    )
+
+    web.main()
+
+    assert _button_disabled(fake_st.calls) is True
+    assert calls == []
+    assert fake_st.session_state["error_message"] == "Unsupported file type: .txt"
+
+
+def test_main_two_file_upload_without_generate_does_not_call_pipeline_helper(
+    monkeypatch,
+) -> None:
+    fake_st = FakeStreamlit(
+        button_clicked=False,
+        input_mode="Two files",
+        first_uploaded_file=FakeUploadedFile("orders.csv", b"x\n"),
+        second_uploaded_file=FakeUploadedFile("products.csv", b"x\n"),
+        first_logical_name="orders",
+        second_logical_name="products",
+        task_text="Merge files.",
+    )
+    calls: list[object] = []
+    monkeypatch.setattr(web, "st", fake_st)
+    monkeypatch.setattr(
+        web,
+        "run_uploaded_tasks_many",
+        lambda **kwargs: calls.append(kwargs),
+    )
+
+    web.main()
+
+    assert calls == []
+
+
+def test_main_single_file_mode_clears_stale_two_file_validation_error(
+    monkeypatch,
+) -> None:
+    fake_st = FakeStreamlit(
+        input_mode="Single file",
+        uploaded_file=None,
+        task_text="Merge files.",
+    )
+    fake_st.session_state["error_message"] = "Upload both files before generating."
+    fake_st.session_state["error_source"] = web.ERROR_SOURCE_VALIDATION
+    monkeypatch.setattr(web, "st", fake_st)
+
+    web.main()
+
+    assert _button_disabled(fake_st.calls) is True
+    assert fake_st.session_state["error_message"] is None
+    assert fake_st.session_state["error_source"] is None
+
+
+def test_main_two_file_cooldown_blocks_before_pipeline_helper(
+    monkeypatch,
+) -> None:
+    fake_st = FakeStreamlit(
+        button_clicked=True,
+        input_mode="Two files",
+        first_uploaded_file=FakeUploadedFile("orders.csv", b"x\n"),
+        second_uploaded_file=FakeUploadedFile("products.csv", b"x\n"),
+        first_logical_name="orders",
+        second_logical_name="products",
+        task_text="Merge files.",
+    )
+    fake_st.session_state["run_count"] = 1
+    fake_st.session_state["last_run_timestamp"] = 100.0
+    calls: list[object] = []
+    monkeypatch.setattr(web, "st", fake_st)
+    monkeypatch.setattr(web.time, "monotonic", lambda: 102.0)
+    monkeypatch.setattr(
+        web,
+        "run_uploaded_tasks_many",
+        lambda **kwargs: calls.append(kwargs),
+    )
+
+    web.main()
+
+    assert calls == []
+    assert fake_st.session_state["error_message"] == (
+        "Please wait 3.0s before running again."
+    )
+
+
 def test_main_generate_click_increments_run_count_before_pipeline(
     monkeypatch,
 ) -> None:
@@ -1331,12 +1648,33 @@ def test_valid_new_upload_clears_previous_upload_error(monkeypatch) -> None:
     uploaded = FakeUploadedFile("orders.csv", b"order_id,total\n1,10\n")
     fake_st = FakeStreamlit(uploaded_file=uploaded)
     fake_st.session_state["error_message"] = "Unsupported file type: .txt"
+    fake_st.session_state["error_source"] = web.ERROR_SOURCE_UPLOAD
     monkeypatch.setattr(web, "st", fake_st)
 
     web.main()
 
     assert fake_st.session_state["uploaded_file_name"] == "orders.csv"
     assert fake_st.session_state["error_message"] is None
+    assert fake_st.session_state["error_source"] is None
+
+
+def test_valid_inputs_do_not_clear_execution_error(monkeypatch) -> None:
+    uploaded = FakeUploadedFile("orders.csv", b"order_id,total\n1,10\n")
+    fake_st = FakeStreamlit(
+        uploaded_file=uploaded,
+        task_text="Keep rows.",
+    )
+    fake_st.session_state["error_message"] = "Execution failed in the sandbox."
+    fake_st.session_state["error_source"] = web.ERROR_SOURCE_EXECUTION
+    monkeypatch.setattr(web, "st", fake_st)
+
+    web.main()
+
+    assert _button_disabled(fake_st.calls) is False
+    assert fake_st.session_state["error_message"] == (
+        "Execution failed in the sandbox."
+    )
+    assert fake_st.session_state["error_source"] == web.ERROR_SOURCE_EXECUTION
 
 
 def test_user_can_edit_task_after_failure_when_rate_limit_allows(

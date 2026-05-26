@@ -1,9 +1,14 @@
 from pathlib import Path
 
+import pandas as pd
 import pytest
 
 from snapscript.core.models import (
+    ColumnInfo,
     ExecutionResult,
+    InputFileSpec,
+    MultiFileSchemaReport,
+    NamedSchemaReport,
     PromptPayload,
     SchemaReport,
 )
@@ -25,6 +30,7 @@ class FakeStreamlit:
         button_clicked: bool = False,
         uploaded_file: FakeUploadedFile | None = None,
         task_text: str = "",
+        input_mode: str = "Single file",
     ) -> None:
         self.session_state: dict[str, object] = {}
         self.calls: list[
@@ -33,6 +39,7 @@ class FakeStreamlit:
         self.button_clicked = button_clicked
         self.uploaded_file = uploaded_file
         self.task_text = task_text
+        self.input_mode = input_mode
 
     def title(self, *args: object, **kwargs: object) -> None:
         self.calls.append(("title", args, kwargs))
@@ -45,6 +52,10 @@ class FakeStreamlit:
     ) -> FakeUploadedFile | None:
         self.calls.append(("file_uploader", args, kwargs))
         return self.uploaded_file
+
+    def radio(self, *args: object, **kwargs: object) -> str:
+        self.calls.append(("radio", args, kwargs))
+        return self.input_mode
 
     def text_area(self, *args: object, **kwargs: object) -> str:
         self.calls.append(("text_area", args, kwargs))
@@ -87,6 +98,40 @@ def _schema() -> SchemaReport:
         file_type="csv",
         row_count=1,
         file_size_bytes=20,
+    )
+
+
+def _multi_schema() -> MultiFileSchemaReport:
+    return MultiFileSchemaReport(
+        files=[
+            NamedSchemaReport(
+                name="orders",
+                schema=SchemaReport(
+                    filename="orders.csv",
+                    file_type="csv",
+                    row_count=3,
+                    file_size_bytes=64,
+                    columns=[
+                        ColumnInfo(name="order_id", dtype="int64"),
+                        ColumnInfo(name="pid", dtype="object"),
+                        ColumnInfo(name="amount", dtype="int64"),
+                    ],
+                ),
+            ),
+            NamedSchemaReport(
+                name="products",
+                schema=SchemaReport(
+                    filename="products.csv",
+                    file_type="csv",
+                    row_count=2,
+                    file_size_bytes=64,
+                    columns=[
+                        ColumnInfo(name="pid", dtype="object"),
+                        ColumnInfo(name="product_name", dtype="object"),
+                    ],
+                ),
+            ),
+        ]
     )
 
 
@@ -140,6 +185,81 @@ def test_run_uploaded_task_calls_existing_core_flow_with_temp_paths(
     assert returned_output == output_bytes
     assert output_file_name == "orders_snapscript_output.csv"
     assert [name for name, _value in calls] == ["inspect", "build", "run"]
+
+
+def test_run_uploaded_tasks_many_mocked_join_flow_uses_safe_pipeline(
+    monkeypatch,
+) -> None:
+    orders_bytes = (
+        b"order_id,pid,amount\n"
+        b"1,p1,100\n"
+        b"2,p2,200\n"
+        b"3,p3,300\n"
+    )
+    products_bytes = b"pid,product_name\np1,Keyboard\np2,Mouse\n"
+    calls: list[str] = []
+    seen_specs: list[list[InputFileSpec]] = []
+
+    def fake_inspect_many(specs: list[InputFileSpec]) -> MultiFileSchemaReport:
+        calls.append("inspect_many")
+        seen_specs.append(specs)
+        assert [spec.name for spec in specs] == ["orders", "products"]
+        assert all(spec.path.parent == specs[0].path.parent for spec in specs)
+        assert specs[0].path.read_bytes() == orders_bytes
+        assert specs[1].path.read_bytes() == products_bytes
+        return _multi_schema()
+
+    def fake_build_many(
+        task_text: str,
+        multi_schema: MultiFileSchemaReport,
+    ) -> PromptPayload:
+        calls.append("build_many")
+        assert "inner join" in task_text
+        assert [file_schema.name for file_schema in multi_schema.files] == [
+            "orders",
+            "products",
+        ]
+        return PromptPayload(system_prompt="system", user_prompt="user")
+
+    def fake_run_many(
+        prompt: PromptPayload,
+        specs: list[InputFileSpec],
+        output_path: Path,
+    ) -> ExecutionResult:
+        calls.append("run_many")
+        seen_specs.append(specs)
+        assert prompt.user_prompt == "user"
+        orders = pd.read_csv(specs[0].path)
+        products = pd.read_csv(specs[1].path)
+        joined = orders.merge(products, on="pid", how="inner")
+        joined.to_csv(output_path, index=False)
+        return ExecutionResult(success=True, output_files=[output_path])
+
+    monkeypatch.setattr(web.schema_inspector, "inspect_many", fake_inspect_many)
+    monkeypatch.setattr(web.prompt_builder, "build_many", fake_build_many)
+    monkeypatch.setattr(web.retry_handler, "run_many", fake_run_many)
+
+    result, output_bytes, output_file_name = web.run_uploaded_tasks_many(
+        first_file_bytes=orders_bytes,
+        first_suffix=".csv",
+        first_logical_name="orders",
+        first_uploaded_file_name="orders.csv",
+        second_file_bytes=products_bytes,
+        second_suffix=".csv",
+        second_logical_name="products",
+        second_uploaded_file_name="products.csv",
+        task_text='Please merge orders and products using the "pid" column with an inner join.',
+    )
+
+    assert result.success is True
+    assert output_file_name == "snapscript_output.csv"
+    assert output_bytes is not None
+    preview = web.load_output_preview(output_bytes, ".csv")
+    assert len(preview) == 2
+    assert list(preview.columns) == ["order_id", "pid", "amount", "product_name"]
+    assert "p3" not in set(preview["pid"])
+    assert calls == ["inspect_many", "build_many", "run_many"]
+    assert seen_specs[0] is seen_specs[1]
 
 
 def test_run_uploaded_task_populates_audit_metadata_without_raw_rows(
