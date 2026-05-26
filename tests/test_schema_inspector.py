@@ -114,6 +114,62 @@ def test_inspect_many_trims_whitespace_before_validation() -> None:
     assert [file.name for file in report.files] == ["orders", "customers"]
 
 
+def test_validate_input_specs_trims_names_preserves_order_and_metadata(
+    tmp_path: Path,
+) -> None:
+    orders_path = tmp_path / "orders.csv"
+    products_path = tmp_path / "products.csv"
+    inputs = [
+        InputFileSpec(
+            name=" orders ",
+            path=orders_path,
+            sheet="orders_sheet",
+            display_filename="Uploaded Orders.csv",
+        ),
+        InputFileSpec(
+            name="\tproducts\n",
+            path=products_path,
+            sheet=None,
+            display_filename="Uploaded Products.csv",
+        ),
+    ]
+
+    validated = schema_inspector.validate_input_specs(inputs)
+
+    assert [input_spec.name for input_spec in validated] == ["orders", "products"]
+    assert [input_spec.path for input_spec in validated] == [
+        orders_path,
+        products_path,
+    ]
+    assert validated[0].sheet == "orders_sheet"
+    assert validated[1].sheet is None
+    assert validated[0].display_filename == "Uploaded Orders.csv"
+    assert validated[1].display_filename == "Uploaded Products.csv"
+    assert validated is not inputs
+    assert [input_spec.name for input_spec in inputs] == [" orders ", "\tproducts\n"]
+
+
+def test_validate_input_specs_rejects_duplicate_names_after_trimming() -> None:
+    with pytest.raises(SchemaInspectionError, match="Duplicate logical input name"):
+        schema_inspector.validate_input_specs(
+            [
+                InputFileSpec(name="orders", path=FIXTURES / "task_02_orders.csv"),
+                InputFileSpec(name=" orders ", path=FIXTURES / "task_01_customers.csv"),
+            ]
+        )
+
+
+@pytest.mark.parametrize(
+    "name",
+    ["Orders", "customer-id", "customer id", "1_orders", ""],
+)
+def test_validate_input_specs_rejects_invalid_logical_names(name: str) -> None:
+    with pytest.raises(SchemaInspectionError, match="Invalid logical input name"):
+        schema_inspector.validate_input_specs(
+            [InputFileSpec(name=name, path=FIXTURES / "task_02_orders.csv")]
+        )
+
+
 def test_inspect_many_rejects_duplicate_logical_names() -> None:
     with pytest.raises(SchemaInspectionError, match="Duplicate logical input name"):
         schema_inspector.inspect_many(
