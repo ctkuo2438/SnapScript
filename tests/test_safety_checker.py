@@ -1,3 +1,4 @@
+import ast
 import importlib.util
 from pathlib import Path
 
@@ -150,10 +151,37 @@ def test_check_returns_invalid_result_for_syntax_error() -> None:
 
 def test_safety_checker_core_has_no_ui_or_execution_dependencies() -> None:
     source = Path("src/snapscript/core/safety_checker.py").read_text()
+    tree = ast.parse(source)
+    imported_modules: set[str] = set()
+    called_names: set[str] = set()
 
-    assert "argparse" not in source
-    assert "rich" not in source
-    assert "streamlit" not in source
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            imported_modules.update(alias.name for alias in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.module is not None:
+            imported_modules.add(node.module)
+        elif isinstance(node, ast.Call):
+            if isinstance(node.func, ast.Name):
+                called_names.add(node.func.id)
+
+    forbidden_modules = {
+        "argparse",
+        "rich",
+        "streamlit",
+        "gradio",
+        "fastapi",
+        "flask",
+        "dash",
+        "subprocess",
+        "snapscript.core.sandbox_executor",
+        "snapscript.core.docker_sandbox_executor",
+        "snapscript.core.execution_backend",
+        "snapscript.core.retry_handler",
+        "snapscript.core.code_generator",
+    }
+
+    assert imported_modules.isdisjoint(forbidden_modules)
     assert "sys.argv" not in source
-    assert "import subprocess" not in source
-    assert "exec(" not in source
+    # Use AST calls here so comments or inert strings containing "exec(" do not fail.
+    assert "exec" not in called_names
+    assert "eval" not in called_names
