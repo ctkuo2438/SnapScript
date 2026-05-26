@@ -7,6 +7,7 @@ from snapscript.core import code_generator, retry_handler
 from snapscript.core.models import (
     ExecutionResult,
     GeneratedScript,
+    InputFileSpec,
     PromptPayload,
     SafetyResult,
 )
@@ -29,6 +30,13 @@ def _success() -> ExecutionResult:
 
 def _failure(stderr: str, exit_code: int = 1) -> ExecutionResult:
     return ExecutionResult(success=False, stderr=stderr, exit_code=exit_code)
+
+
+def _input_specs(tmp_path: Path) -> list[InputFileSpec]:
+    return [
+        InputFileSpec(name="orders", path=tmp_path / "orders.csv"),
+        InputFileSpec(name="products", path=tmp_path / "products.csv"),
+    ]
 
 
 def test_run_retries_traceback_failures_and_uses_fallback_on_final_call(
@@ -341,3 +349,227 @@ def test_run_checks_safety_before_execution_backend(
 
     assert result.success is True
     assert events == ["safety:safe code", "execute:safe code"]
+
+
+def test_run_many_generates_checks_safety_then_executes_validated_inputs(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+    generated_calls: list[tuple[PromptPayload, str | None]] = []
+    executed_inputs: list[list[InputFileSpec]] = []
+
+    def fake_generate(
+        prompt: PromptPayload, model: str | None = None
+    ) -> GeneratedScript:
+        events.append("generate")
+        generated_calls.append((prompt, model))
+        return _script("safe multi code")
+
+    def fake_check(code: str) -> SafetyResult:
+        events.append(f"safety:{code}")
+        return SafetyResult(is_safe=True)
+
+    def fake_execute(
+        code: str,
+        input_path: Path | list[InputFileSpec],
+        output_path: Path,
+        config: AppConfig | None = None,
+    ) -> ExecutionResult:
+        events.append(f"execute:{code}")
+        assert isinstance(input_path, list)
+        executed_inputs.append(input_path)
+        return _success()
+
+    monkeypatch.setattr(retry_handler.code_generator, "generate", fake_generate)
+    monkeypatch.setattr(retry_handler.safety_checker, "check", fake_check)
+    monkeypatch.setattr(retry_handler.execution_backend, "execute", fake_execute)
+
+    result = retry_handler.run_many(
+        _prompt(),
+        [
+            InputFileSpec(name=" orders ", path=tmp_path / "orders.csv"),
+            InputFileSpec(name="\tproducts\n", path=tmp_path / "products.csv"),
+        ],
+        tmp_path / "out.csv",
+    )
+
+    assert result.success is True
+    assert events == ["generate", "safety:safe multi code", "execute:safe multi code"]
+    assert len(generated_calls) == 1
+    assert [input_spec.name for input_spec in executed_inputs[0]] == [
+        "orders",
+        "products",
+    ]
+    assert [input_spec.path for input_spec in executed_inputs[0]] == [
+        tmp_path / "orders.csv",
+        tmp_path / "products.csv",
+    ]
+
+
+def test_run_many_does_not_retry_safety_violations(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    generate_calls = 0
+    execute_calls = 0
+
+    def fake_generate(
+        prompt: PromptPayload, model: str | None = None
+    ) -> GeneratedScript:
+        nonlocal generate_calls
+        generate_calls += 1
+        return _script("import os")
+
+    def fake_execute(
+        code: str,
+        input_path: Path | list[InputFileSpec],
+        output_path: Path,
+        config: AppConfig | None = None,
+    ) -> ExecutionResult:
+        nonlocal execute_calls
+        execute_calls += 1
+        return _success()
+
+    monkeypatch.setattr(retry_handler.code_generator, "generate", fake_generate)
+    monkeypatch.setattr(
+        retry_handler.safety_checker,
+        "check",
+        lambda code: SafetyResult(
+            is_safe=False,
+            violations=["Blocked unsafe import: os"],
+        ),
+    )
+    monkeypatch.setattr(retry_handler.execution_backend, "execute", fake_execute)
+
+    result = retry_handler.run_many(
+        _prompt(),
+        _input_specs(tmp_path),
+        tmp_path / "out.csv",
+    )
+
+    assert result.success is False
+    assert "Safety violation" in result.stderr
+    assert "Blocked unsafe import: os" in result.stderr
+    assert generate_calls == 1
+    assert execute_calls == 0
+
+
+def test_run_many_retries_stderr_failure_then_succeeds(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    generated_calls: list[tuple[PromptPayload, str | None]] = []
+    executed_codes: list[str] = []
+
+    def fake_generate(
+        prompt: PromptPayload, model: str | None = None
+    ) -> GeneratedScript:
+        generated_calls.append((prompt, model))
+        return _script(f"code v{len(generated_calls)}")
+
+    def fake_execute(
+        code: str,
+        input_path: Path | list[InputFileSpec],
+        output_path: Path,
+        config: AppConfig | None = None,
+    ) -> ExecutionResult:
+        executed_codes.append(code)
+        if len(executed_codes) == 1:
+            return _failure("Traceback (most recent call last):\nValueError: bad")
+        return _success()
+
+    monkeypatch.setattr(retry_handler.code_generator, "generate", fake_generate)
+    monkeypatch.setattr(
+        retry_handler.safety_checker,
+        "check",
+        lambda code: SafetyResult(is_safe=True),
+    )
+    monkeypatch.setattr(retry_handler.execution_backend, "execute", fake_execute)
+
+    result = retry_handler.run_many(
+        _prompt(),
+        _input_specs(tmp_path),
+        tmp_path / "out.csv",
+    )
+
+    assert result.success is True
+    assert executed_codes == ["code v1", "code v2"]
+    assert len(generated_calls) == 2
+    retry_prompt = generated_calls[1][0]
+    assert retry_prompt.system_prompt == "system prompt"
+    assert "original user prompt" in retry_prompt.user_prompt
+    assert "ValueError: bad" in retry_prompt.user_prompt
+    assert "code v1" in retry_prompt.user_prompt
+
+
+@pytest.mark.parametrize(
+    "inputs, expected_error",
+    [
+        ([], "At least one input file is required"),
+        (
+            [InputFileSpec(name="Orders", path=Path("orders.csv"))],
+            "Invalid logical input name",
+        ),
+        (
+            [InputFileSpec(name="customer-id", path=Path("customers.csv"))],
+            "Invalid logical input name",
+        ),
+        (
+            [InputFileSpec(name="customer id", path=Path("customers.csv"))],
+            "Invalid logical input name",
+        ),
+        (
+            [InputFileSpec(name="1_orders", path=Path("orders.csv"))],
+            "Invalid logical input name",
+        ),
+        (
+            [InputFileSpec(name="", path=Path("orders.csv"))],
+            "Invalid logical input name",
+        ),
+        (
+            [
+                InputFileSpec(name="orders", path=Path("orders.csv")),
+                InputFileSpec(name=" orders ", path=Path("other_orders.csv")),
+            ],
+            "Duplicate logical input name",
+        ),
+    ],
+)
+def test_run_many_validation_failures_return_without_generation_or_execution(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    inputs: list[InputFileSpec],
+    expected_error: str,
+) -> None:
+    calls = {"generate": 0, "safety": 0, "execute": 0}
+
+    def fake_generate(
+        prompt: PromptPayload, model: str | None = None
+    ) -> GeneratedScript:
+        calls["generate"] += 1
+        return _script("code")
+
+    def fake_check(code: str) -> SafetyResult:
+        calls["safety"] += 1
+        return SafetyResult(is_safe=True)
+
+    def fake_execute(
+        code: str,
+        input_path: Path | list[InputFileSpec],
+        output_path: Path,
+        config: AppConfig | None = None,
+    ) -> ExecutionResult:
+        calls["execute"] += 1
+        return _success()
+
+    monkeypatch.setattr(retry_handler.code_generator, "generate", fake_generate)
+    monkeypatch.setattr(retry_handler.safety_checker, "check", fake_check)
+    monkeypatch.setattr(retry_handler.execution_backend, "execute", fake_execute)
+
+    result = retry_handler.run_many(_prompt(), inputs, tmp_path / "out.csv")
+
+    assert result.success is False
+    assert result.exit_code == 1
+    assert expected_error in result.stderr
+    assert calls == {"generate": 0, "safety": 0, "execute": 0}

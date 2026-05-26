@@ -24,8 +24,18 @@ from __future__ import annotations
 from pathlib import Path
 
 from snapscript.config import AppConfig
-from snapscript.core import code_generator, execution_backend, safety_checker
-from snapscript.core.models import ExecutionResult, GeneratedScript, PromptPayload
+from snapscript.core import (
+    code_generator,
+    execution_backend,
+    safety_checker,
+    schema_inspector,
+)
+from snapscript.core.models import (
+    ExecutionResult,
+    GeneratedScript,
+    InputFileSpec,
+    PromptPayload,
+)
 
 
 PROMPT_DIR = Path(__file__).resolve().parents[1] / "prompts"
@@ -34,6 +44,32 @@ MAX_MODEL_CALLS = 3 # 1. ori prompt, 2. retry with same model, 3. retry with fal
 
 
 def run(prompt: PromptPayload, input_path: Path, output_path: Path) -> ExecutionResult:
+    return _run_with_inputs(prompt, input_path, output_path)
+
+
+def run_many(
+    prompt: PromptPayload,
+    inputs: list[InputFileSpec],
+    output_path: Path,
+) -> ExecutionResult:
+    try:
+        validated_inputs = schema_inspector.validate_input_specs(inputs)
+    except schema_inspector.SchemaInspectionError as exc:
+        return ExecutionResult(
+            success=False,
+            stderr=str(exc),
+            exit_code=1,
+        )
+    return _run_with_inputs(prompt, validated_inputs, output_path)
+
+
+# single-file and multi-file use the same retry logic,
+#   the only difference is the type of input spec (Path vs list[InputFileSpec])
+def _run_with_inputs(
+    prompt: PromptPayload,
+    input_path: Path | list[InputFileSpec], # single or multi input spec
+    output_path: Path,
+) -> ExecutionResult:
     config = AppConfig()
     max_model_calls = min(config.max_retries + 1, MAX_MODEL_CALLS)
     current_prompt = prompt
@@ -45,15 +81,16 @@ def run(prompt: PromptPayload, input_path: Path, output_path: Path) -> Execution
             if call_number > 0 and call_number == max_model_calls - 1
             else None
         )
-        # generate code with the current prompt and LLM model,
-        #   if API key is invalid, this will raise an exception and skip retries
+        # 1. generate code with the current prompt and LLM model
         # if model = None, use default model, else use fallback model
         generated = code_generator.generate(current_prompt, model=model)
 
+        # 2. check code safety
         safety_result = safety_checker.check(generated.code)
         if not safety_result.is_safe:
             return _safety_failure(safety_result.violations)
-
+     
+        # 3. execute the generated code
         # subprocess -> sandbox_executor.execute(...)
         # docker     -> docker_sandbox_executor.execute(...)
         result = execution_backend.execute(
