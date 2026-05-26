@@ -92,7 +92,7 @@
 - Use the configured provider SDK; do not hand-roll HTTP calls.
 - Keep system and user prompts separate.
 - Read provider and model names from config; do not hardcode them in business logic.
-- `generate(prompt, model=None)` supports fallback escalation through `config.fallback_model`.
+- If fallback escalation is implemented or modified, use `config.fallback_model`; do not hardcode fallback models in business logic.
 - Use `temperature=0` for code generation and keep API retries bounded.
 - Real-provider tests must be opt-in only.
 
@@ -102,3 +102,21 @@
 - Use `uv run` commands for verification.
 - Run the smallest relevant tests first, then broader tests for gates.
 - Do not commit, push, or run destructive commands unless explicitly asked.
+
+## Code Review Rules
+
+When reviewing code, flag the following:
+
+- Functions longer than 50 lines, unless the length is clearly justified.
+- Abstractions that are only used once and do not improve readability.
+- Speculative features not required by the current task.
+- Dead code, unused imports, unused variables, and stale comments.
+- Repeated test fixtures or fake classes that could be shared.
+- Code paths that duplicate validation/business logic already owned by core modules.
+- Cases where 200 lines could reasonably be 50 without losing clarity.
+- Ask: would a senior engineer say this is overcomplicated?
+
+Review mode rule:
+- If asked to review, report findings first.
+- Do not rewrite code unless explicitly asked.
+- Prefer small, scoped cleanup patches over broad rewrites.
