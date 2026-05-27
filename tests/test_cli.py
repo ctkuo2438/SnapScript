@@ -83,7 +83,7 @@ def _patch_pipeline(
     monkeypatch.setattr(
         cli.code_generator,
         "generate",
-        lambda prompt: calls.append("generate") or _script(),
+        lambda prompt, model=None: calls.append("generate") or _script(),
     )
     monkeypatch.setattr(
         cli.safety_checker,
@@ -94,7 +94,7 @@ def _patch_pipeline(
     monkeypatch.setattr(
         cli.retry_handler,
         "run",
-        lambda prompt, input_path, output_path: calls.append("retry")
+        lambda prompt, input_path, output_path, model=None: calls.append("retry")
         or (
             execution
             if execution is not None
@@ -116,6 +116,7 @@ def test_help_output_lists_phase_1_options(capsys: pytest.CaptureFixture[str]) -
     assert "two-file" in output
     assert "--dry-run" in output
     assert "--show-code" in output
+    assert "--model" in output
 
 
 def test_validates_input_before_generation(
@@ -127,7 +128,7 @@ def test_validates_input_before_generation(
     monkeypatch.setattr(
         cli.code_generator,
         "generate",
-        lambda prompt: calls.append("generate") or _script(),
+        lambda prompt, model=None: calls.append("generate") or _script(),
     )
 
     status = cli.main(
@@ -157,7 +158,7 @@ def test_rejects_unsupported_extension_before_generation(
     monkeypatch.setattr(
         cli.code_generator,
         "generate",
-        lambda prompt: calls.append("generate") or _script(),
+        lambda prompt, model=None: calls.append("generate") or _script(),
     )
 
     status = cli.main(
@@ -208,6 +209,154 @@ def test_dry_run_generates_and_checks_but_does_not_execute(
     assert "Dry run complete" in output
 
 
+def test_dry_run_rejects_ast_invalid_safety_result(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    input_path = tmp_path / "orders.csv"
+    input_path.write_text("order_id,amount\n1,10\n")
+    calls: list[str] = []
+    _patch_pipeline(
+        monkeypatch,
+        calls,
+        safety=SafetyResult(
+            is_safe=True,
+            ast_valid=False,
+            violations=["Syntax error: invalid syntax"],
+        ),
+    )
+
+    status = cli.main(
+        [
+            "filter rows",
+            "--file",
+            str(input_path),
+            "--output",
+            str(tmp_path / "out.csv"),
+            "--dry-run",
+            "--show-code",
+        ]
+    )
+
+    captured = capsys.readouterr()
+    assert status == 2
+    assert calls == ["inspect:None", "build:filter rows", "generate", "safety"]
+    assert "Safety check failed" in captured.out
+    assert "Safety check passed" not in captured.out
+    assert "Syntax error" in captured.err
+    assert "Dry run complete" not in captured.out
+
+
+def test_dry_run_invalid_generated_python_fails_before_success(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    input_path = tmp_path / "orders.csv"
+    input_path.write_text("order_id,amount\n1,10\n")
+    monkeypatch.setattr(
+        cli.schema_inspector,
+        "inspect",
+        lambda path, sheet=None: _schema(),
+    )
+    monkeypatch.setattr(
+        cli.prompt_builder,
+        "build",
+        lambda task, schema: _payload(),
+    )
+    monkeypatch.setattr(
+        cli.code_generator,
+        "generate",
+        lambda prompt, model=None: GeneratedScript(
+            code="x =",
+            raw_response="x =",
+            model="mock-model",
+        ),
+    )
+
+    status = cli.main(
+        [
+            "filter rows",
+            "--file",
+            str(input_path),
+            "--output",
+            str(tmp_path / "out.csv"),
+            "--dry-run",
+            "--show-code",
+        ]
+    )
+
+    captured = capsys.readouterr()
+    assert status == 2
+    assert "Safety check failed" in captured.out
+    assert "Safety check passed" not in captured.out
+    assert "Syntax error" in captured.err
+    assert "Dry run complete" not in captured.out
+
+
+def test_dry_run_model_override_passes_model_to_code_generator(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    input_path = tmp_path / "orders.csv"
+    input_path.write_text("order_id,amount\n1,10\n")
+    seen_models: list[str | None] = []
+    monkeypatch.setattr(cli.schema_inspector, "inspect", lambda path, sheet=None: _schema())
+    monkeypatch.setattr(cli.prompt_builder, "build", lambda task, schema: _payload())
+    monkeypatch.setattr(
+        cli.code_generator,
+        "generate",
+        lambda prompt, model=None: seen_models.append(model) or _script(),
+    )
+
+    status = cli.main(
+        [
+            "filter rows",
+            "--file",
+            str(input_path),
+            "--output",
+            str(tmp_path / "out.csv"),
+            "--dry-run",
+            "--model",
+            "claude-opus-4-20250514",
+        ]
+    )
+
+    assert status == 0
+    assert seen_models == ["claude-opus-4-20250514"]
+
+
+def test_dry_run_without_model_override_preserves_default_generation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    input_path = tmp_path / "orders.csv"
+    input_path.write_text("order_id,amount\n1,10\n")
+    seen_models: list[str | None] = []
+    monkeypatch.setattr(cli.schema_inspector, "inspect", lambda path, sheet=None: _schema())
+    monkeypatch.setattr(cli.prompt_builder, "build", lambda task, schema: _payload())
+    monkeypatch.setattr(
+        cli.code_generator,
+        "generate",
+        lambda prompt, model=None: seen_models.append(model) or _script(),
+    )
+
+    status = cli.main(
+        [
+            "filter rows",
+            "--file",
+            str(input_path),
+            "--output",
+            str(tmp_path / "out.csv"),
+            "--dry-run",
+        ]
+    )
+
+    assert status == 0
+    assert seen_models == [None]
+
+
 def test_yes_executes_without_confirmation(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -234,6 +383,40 @@ def test_yes_executes_without_confirmation(
     assert status == 0
     assert calls == ["inspect:None", "build:filter rows", "retry"]
     assert "Execution succeeded" in output
+
+
+def test_model_override_passes_model_to_retry_pipeline(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    input_path = tmp_path / "orders.csv"
+    output_path = tmp_path / "out.csv"
+    input_path.write_text("order_id,amount\n1,10\n")
+    seen_models: list[str | None] = []
+    monkeypatch.setattr(cli.schema_inspector, "inspect", lambda path, sheet=None: _schema())
+    monkeypatch.setattr(cli.prompt_builder, "build", lambda task, schema: _payload())
+    monkeypatch.setattr(
+        cli.retry_handler,
+        "run",
+        lambda prompt, input_path, output_path, model=None: seen_models.append(model)
+        or ExecutionResult(success=True, exit_code=0),
+    )
+
+    status = cli.main(
+        [
+            "filter rows",
+            "--file",
+            str(input_path),
+            "--output",
+            str(output_path),
+            "--yes",
+            "--model",
+            "claude-opus-4-20250514",
+        ]
+    )
+
+    assert status == 0
+    assert seen_models == ["claude-opus-4-20250514"]
 
 
 def test_two_named_files_call_multi_file_core_pipeline(
@@ -264,7 +447,7 @@ def test_two_named_files_call_multi_file_core_pipeline(
     monkeypatch.setattr(
         cli.retry_handler,
         "run_many",
-        lambda prompt, specs, output: calls.append("run_many")
+        lambda prompt, specs, output, model=None: calls.append("run_many")
         or seen_specs.append(specs)
         or ExecutionResult(success=True, stdout="joined output", exit_code=0),
     )
@@ -281,7 +464,7 @@ def test_two_named_files_call_multi_file_core_pipeline(
     monkeypatch.setattr(
         cli.retry_handler,
         "run",
-        lambda prompt, input_path, output_path: pytest.fail("single-file retry should not run"),
+        lambda prompt, input_path, output_path, model=None: pytest.fail("single-file retry should not run"),
     )
 
     status = cli.main(
@@ -334,7 +517,7 @@ def test_rejects_sheet_in_multi_file_mode_before_core_pipeline(
     monkeypatch.setattr(
         cli.retry_handler,
         "run_many",
-        lambda prompt, specs, output: calls.append("run_many")
+        lambda prompt, specs, output, model=None: calls.append("run_many")
         or ExecutionResult(success=True, exit_code=0),
     )
 
@@ -450,7 +633,10 @@ def test_api_key_is_redacted_from_errors(
     _patch_pipeline(monkeypatch, calls)
 
     def fail_retry(
-        prompt: PromptPayload, input_path: Path, output_path: Path
+        prompt: PromptPayload,
+        input_path: Path,
+        output_path: Path,
+        model: str | None = None,
     ) -> ExecutionResult:
         raise RuntimeError("provider rejected secret-api-key")
 

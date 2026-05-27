@@ -43,14 +43,20 @@ RETRY_PROMPT_PATH = PROMPT_DIR / "retry.txt"
 MAX_MODEL_CALLS = 3 # 1. ori prompt, 2. retry with same model, 3. retry with fallback model (claude opus-4)
 
 
-def run(prompt: PromptPayload, input_path: Path, output_path: Path) -> ExecutionResult:
-    return _run_with_inputs(prompt, input_path, output_path)
+def run(
+    prompt: PromptPayload,
+    input_path: Path,
+    output_path: Path,
+    model: str | None = None,
+) -> ExecutionResult:
+    return _run_with_inputs(prompt, input_path, output_path, model=model)
 
 
 def run_many(
     prompt: PromptPayload,
     inputs: list[InputFileSpec],
     output_path: Path,
+    model: str | None = None,
 ) -> ExecutionResult:
     try:
         validated_inputs = schema_inspector.validate_input_specs(inputs)
@@ -60,7 +66,7 @@ def run_many(
             stderr=str(exc),
             exit_code=1,
         )
-    return _run_with_inputs(prompt, validated_inputs, output_path)
+    return _run_with_inputs(prompt, validated_inputs, output_path, model=model)
 
 
 # single-file and multi-file use the same retry logic,
@@ -69,6 +75,7 @@ def _run_with_inputs(
     prompt: PromptPayload,
     input_path: Path | list[InputFileSpec], # single or multi input spec
     output_path: Path,
+    model: str | None = None,
 ) -> ExecutionResult:
     config = AppConfig()
     max_model_calls = min(config.max_retries + 1, MAX_MODEL_CALLS)
@@ -76,18 +83,18 @@ def _run_with_inputs(
     last_result: ExecutionResult | None = None
 
     for call_number in range(max_model_calls):
-        model = (
+        generation_model = (
             config.fallback_model # fallback model is claude-opus-4-20250514
             if call_number > 0 and call_number == max_model_calls - 1
-            else None
+            else model
         )
         # 1. generate code with the current prompt and LLM model
         # if model = None, use default model, else use fallback model
-        generated = code_generator.generate(current_prompt, model=model)
+        generated = code_generator.generate(current_prompt, model=generation_model)
 
         # 2. check code safety
         safety_result = safety_checker.check(generated.code)
-        if not safety_result.is_safe:
+        if not safety_result.is_safe or not safety_result.ast_valid:
             return _safety_failure(safety_result.violations)
      
         # 3. execute the generated code

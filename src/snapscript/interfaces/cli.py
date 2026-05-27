@@ -79,6 +79,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="Provider API key for this run.",
     )
     parser.add_argument(
+        "--model",
+        help="Provider model name to use for this run.",
+    )
+    parser.add_argument(
         "--verbose",
         action="store_true",
         help="Show additional run metadata.",
@@ -116,7 +120,12 @@ def main(argv: list[str] | None = None) -> int:
             schema = schema_inspector.inspect(input_mode, sheet=args.sheet)
             _show_schema_summary(console, schema)
             prompt = prompt_builder.build(args.task, schema)
-            run_result = lambda: retry_handler.run(prompt, input_mode, output_path)
+            run_result = lambda: retry_handler.run(
+                prompt,
+                input_mode,
+                output_path,
+                model=args.model,
+            )
         else:
             if args.sheet:
                 error_console.print("--sheet is only supported in single-file mode for now.")
@@ -130,7 +139,12 @@ def main(argv: list[str] | None = None) -> int:
             schema = schema_inspector.inspect_many(input_mode)
             _show_multi_schema_summary(console, schema)
             prompt = prompt_builder.build_many(args.task, schema)
-            run_result = lambda: retry_handler.run_many(prompt, input_mode, output_path)
+            run_result = lambda: retry_handler.run_many(
+                prompt,
+                input_mode,
+                output_path,
+                model=args.model,
+            )
 
         if not args.dry_run:
             if not args.yes and not _confirm_execution():
@@ -141,12 +155,12 @@ def main(argv: list[str] | None = None) -> int:
             _show_execution_result(console, error_console, result)
             return _execution_status(result)
 
-        generated = code_generator.generate(prompt)
+        generated = code_generator.generate(prompt, model=args.model)
         _show_generation_metadata(console, generated)
 
         safety = safety_checker.check(generated.code)
         _show_safety_result(console, safety)
-        if not safety.is_safe:
+        if not safety.is_safe or not safety.ast_valid:
             error_console.print("\n".join(safety.violations))
             return 2
 
@@ -230,7 +244,7 @@ def _show_generation_metadata(console: Console, generated: GeneratedScript) -> N
 
 
 def _show_safety_result(console: Console, safety: SafetyResult) -> None:
-    if safety.is_safe:
+    if safety.is_safe and safety.ast_valid:
         console.print("Safety check passed")
         return
 

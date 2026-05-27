@@ -181,6 +181,45 @@ def test_run_does_not_retry_safety_violations(
     assert execute_calls == 0
 
 
+def test_run_treats_ast_invalid_safety_result_as_failure_before_execution(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    execute_calls = 0
+
+    def fake_execute(
+        code: str,
+        input_path: Path,
+        output_path: Path,
+        config: AppConfig | None = None,
+    ) -> ExecutionResult:
+        nonlocal execute_calls
+        execute_calls += 1
+        return _success()
+
+    monkeypatch.setattr(
+        retry_handler.code_generator,
+        "generate",
+        lambda _prompt, model=None: _script("x ="),
+    )
+    monkeypatch.setattr(
+        retry_handler.safety_checker,
+        "check",
+        lambda code: SafetyResult(
+            is_safe=True,
+            ast_valid=False,
+            violations=["Syntax error"],
+        ),
+    )
+    monkeypatch.setattr(retry_handler.execution_backend, "execute", fake_execute)
+
+    result = retry_handler.run(_prompt(), tmp_path / "input.csv", tmp_path / "out.csv")
+
+    assert result.success is False
+    assert "Safety violation" in result.stderr
+    assert "Syntax error" in result.stderr
+    assert execute_calls == 0
+
+
 def test_run_does_not_retry_timeouts(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -452,6 +491,50 @@ def test_run_many_does_not_retry_safety_violations(
     assert "Safety violation" in result.stderr
     assert "Blocked unsafe import: os" in result.stderr
     assert generate_calls == 1
+    assert execute_calls == 0
+
+
+def test_run_many_treats_ast_invalid_safety_result_as_failure_before_execution(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    execute_calls = 0
+
+    def fake_execute(
+        code: str,
+        input_path: Path | list[InputFileSpec],
+        output_path: Path,
+        config: AppConfig | None = None,
+    ) -> ExecutionResult:
+        nonlocal execute_calls
+        execute_calls += 1
+        return _success()
+
+    monkeypatch.setattr(
+        retry_handler.code_generator,
+        "generate",
+        lambda _prompt, model=None: _script("x ="),
+    )
+    monkeypatch.setattr(
+        retry_handler.safety_checker,
+        "check",
+        lambda code: SafetyResult(
+            is_safe=True,
+            ast_valid=False,
+            violations=["Syntax error"],
+        ),
+    )
+    monkeypatch.setattr(retry_handler.execution_backend, "execute", fake_execute)
+
+    result = retry_handler.run_many(
+        _prompt(),
+        _input_specs(tmp_path),
+        tmp_path / "out.csv",
+    )
+
+    assert result.success is False
+    assert "Safety violation" in result.stderr
+    assert "Syntax error" in result.stderr
     assert execute_calls == 0
 
 

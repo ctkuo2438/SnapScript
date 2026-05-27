@@ -149,6 +149,14 @@ def test_check_returns_invalid_result_for_syntax_error() -> None:
     assert any("syntax" in violation.lower() for violation in result.violations)
 
 
+def test_check_fails_safely_for_incomplete_assignment() -> None:
+    result = safety_checker.check("x =")
+
+    assert result.is_safe is False
+    assert result.ast_valid is False
+    assert any("syntax" in violation.lower() for violation in result.violations)
+
+
 def test_safety_checker_core_has_no_ui_or_execution_dependencies() -> None:
     source = Path("src/snapscript/core/safety_checker.py").read_text()
     tree = ast.parse(source)
