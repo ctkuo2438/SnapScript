@@ -572,8 +572,21 @@ def test_show_code_prints_generated_code(
 ) -> None:
     input_path = tmp_path / "orders.csv"
     input_path.write_text("order_id,amount\n1,10\n")
-    calls: list[str] = []
-    _patch_pipeline(monkeypatch, calls)
+    generated_code = (
+        "combined_df = pd.concat([orders_df, filtered_orders_df], "
+        "ignore_index=True)"
+    )
+    monkeypatch.setattr(cli.schema_inspector, "inspect", lambda path, sheet=None: _schema())
+    monkeypatch.setattr(cli.prompt_builder, "build", lambda task, schema: _payload())
+    monkeypatch.setattr(
+        cli.code_generator,
+        "generate",
+        lambda prompt, model=None: GeneratedScript(
+            code=generated_code,
+            raw_response=generated_code,
+            model="test-model",
+        ),
+    )
 
     status = cli.main(
         [
@@ -588,7 +601,7 @@ def test_show_code_prints_generated_code(
     )
 
     assert status == 0
-    assert "print('ok')" in capsys.readouterr().out
+    assert generated_code in capsys.readouterr().out
 
 
 def test_api_key_is_not_printed(

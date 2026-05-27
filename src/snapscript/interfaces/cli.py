@@ -255,7 +255,9 @@ def _show_safety_result(console: Console, safety: SafetyResult) -> None:
 
 def _show_generated_code(console: Console, code: str) -> None:
     console.print("Generated code")
-    console.print(code)
+    # print the original code, don't treat the [] as markup for rich 
+    #   since the generated code may contain arbitrary brackets
+    console.print(code, markup=False)
 
 
 def _confirm_execution() -> bool:
