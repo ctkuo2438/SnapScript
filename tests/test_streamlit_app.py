@@ -52,6 +52,23 @@ class FakeUploadedFile:
         return self._file_bytes
 
 
+class FakeSidebar:
+    def __init__(self, parent: "FakeStreamlit") -> None:
+        self.parent = parent
+
+    def subheader(self, *args: object, **kwargs: object) -> None:
+        self.parent.calls.append(("sidebar.subheader", args, kwargs))
+
+    def write(self, *args: object, **kwargs: object) -> None:
+        self.parent.calls.append(("sidebar.write", args, kwargs))
+
+    def caption(self, *args: object, **kwargs: object) -> None:
+        self.parent.calls.append(("sidebar.caption", args, kwargs))
+
+    def code(self, *args: object, **kwargs: object) -> None:
+        self.parent.calls.append(("sidebar.code", args, kwargs))
+
+
 class FakeStreamlit:
     def __init__(
         self,
@@ -76,6 +93,7 @@ class FakeStreamlit:
         self.second_uploaded_file = second_uploaded_file
         self.first_logical_name = first_logical_name
         self.second_logical_name = second_logical_name
+        self.sidebar = FakeSidebar(self)
 
     def title(self, *args: object, **kwargs: object) -> None:
         self.calls.append(("title", args, kwargs))
@@ -1489,6 +1507,41 @@ def test_main_renders_remaining_runs_display(monkeypatch) -> None:
     assert (
         "caption",
         ("Remaining runs this session: 6",),
+        {},
+    ) in fake_st.calls
+
+
+def test_main_sidebar_shows_default_sandbox_backend(monkeypatch) -> None:
+    monkeypatch.delenv("SNAPSCRIPT_SANDBOX_BACKEND", raising=False)
+    fake_st = FakeStreamlit()
+    monkeypatch.setattr(web, "st", fake_st)
+
+    web.main()
+
+    assert ("sidebar.subheader", ("Runtime",), {}) in fake_st.calls
+    assert (
+        "sidebar.write",
+        ("Sandbox backend: subprocess",),
+        {},
+    ) in fake_st.calls
+    assert ("sidebar.caption", ("Use Docker backend:",), {}) in fake_st.calls
+    assert (
+        "sidebar.code",
+        ("SNAPSCRIPT_SANDBOX_BACKEND=docker uv run streamlit run app.py",),
+        {},
+    ) in fake_st.calls
+
+
+def test_main_sidebar_shows_docker_sandbox_backend(monkeypatch) -> None:
+    monkeypatch.setenv("SNAPSCRIPT_SANDBOX_BACKEND", "docker")
+    fake_st = FakeStreamlit()
+    monkeypatch.setattr(web, "st", fake_st)
+
+    web.main()
+
+    assert (
+        "sidebar.write",
+        ("Sandbox backend: docker",),
         {},
     ) in fake_st.calls
 

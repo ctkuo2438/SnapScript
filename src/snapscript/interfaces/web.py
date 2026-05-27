@@ -50,6 +50,9 @@ INPUT_MODE_TWO = "Two files"
 ERROR_SOURCE_UPLOAD = "upload"
 ERROR_SOURCE_VALIDATION = "validation"
 ERROR_SOURCE_EXECUTION = "execution"
+DOCKER_BACKEND_HINT = (
+    "SNAPSCRIPT_SANDBOX_BACKEND=docker uv run streamlit run app.py"
+)
 
 SESSION_DEFAULTS: dict[str, object] = {
     "input_mode": INPUT_MODE_SINGLE,
@@ -82,6 +85,15 @@ def initialize_session_state(
     target = st.session_state if state is None else state
     for key, default in SESSION_DEFAULTS.items():
         target.setdefault(key, default)
+
+
+def render_runtime_sidebar() -> None:
+    config = AppConfig()
+
+    st.sidebar.subheader("Runtime")
+    st.sidebar.write(f"Sandbox backend: {config.sandbox_backend}")
+    st.sidebar.caption("Use Docker backend:")
+    st.sidebar.code(DOCKER_BACKEND_HINT)
 
 
 def clear_output_state(state: MutableMapping[str, object]) -> None:
@@ -784,6 +796,7 @@ def main() -> None:
 
     st.title("SnapScript")
     st.write("Transform a CSV or Excel file with a natural-language task.")
+    render_runtime_sidebar()
     current_input_error: str | None = None
 
     input_mode = st.radio(

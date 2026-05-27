@@ -24,6 +24,23 @@ class FakeUploadedFile:
         return self._file_bytes
 
 
+class FakeSidebar:
+    def __init__(self, parent: "FakeStreamlit") -> None:
+        self.parent = parent
+
+    def subheader(self, *args: object, **kwargs: object) -> None:
+        self.parent.calls.append(("sidebar.subheader", args, kwargs))
+
+    def write(self, *args: object, **kwargs: object) -> None:
+        self.parent.calls.append(("sidebar.write", args, kwargs))
+
+    def caption(self, *args: object, **kwargs: object) -> None:
+        self.parent.calls.append(("sidebar.caption", args, kwargs))
+
+    def code(self, *args: object, **kwargs: object) -> None:
+        self.parent.calls.append(("sidebar.code", args, kwargs))
+
+
 class FakeStreamlit:
     def __init__(
         self,
@@ -40,6 +57,7 @@ class FakeStreamlit:
         self.uploaded_file = uploaded_file
         self.task_text = task_text
         self.input_mode = input_mode
+        self.sidebar = FakeSidebar(self)
 
     def title(self, *args: object, **kwargs: object) -> None:
         self.calls.append(("title", args, kwargs))
