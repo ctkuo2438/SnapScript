@@ -11,6 +11,7 @@ from snapscript.core.models import (
     PromptPayload,
     SafetyResult,
     SchemaReport,
+    TaskAdvice,
 )
 
 
@@ -21,6 +22,7 @@ def test_all_shared_models_are_dataclasses() -> None:
         InputFileSpec,
         NamedSchemaReport,
         MultiFileSchemaReport,
+        TaskAdvice,
         PromptPayload,
         GeneratedScript,
         SafetyResult,

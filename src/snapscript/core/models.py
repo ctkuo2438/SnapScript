@@ -3,6 +3,7 @@ for internal data models used across the application, not use for external API m
 '''
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Literal
 
 
 @dataclass
@@ -67,6 +68,14 @@ MultiFileSchemaReport(
 @dataclass
 class MultiFileSchemaReport:
     files: list[NamedSchemaReport] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class TaskAdvice:
+    quality: Literal["good", "needs_detail", "too_vague"]
+    missing_details: list[str] = field(default_factory=list)
+    suggestions: list[str] = field(default_factory=list)
+    suggested_task: str | None = None
 
 
 @dataclass
