@@ -78,6 +78,14 @@ class TaskAdvice:
     suggested_task: str | None = None
 
 
+@dataclass(frozen=True)
+class RewrittenTask:
+    original_task: str
+    rewritten_task: str
+    provider: str
+    model: str
+
+
 @dataclass
 # represents the payload for prompt generation, including system and user prompts
 class PromptPayload:
