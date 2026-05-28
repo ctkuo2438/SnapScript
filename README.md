@@ -1,46 +1,59 @@
 # SnapScript
 
-SnapScript is a local AI-assisted CSV/Excel transformation tool that converts natural-language data tasks into sandboxed, validated pandas executions.
+SnapScript is a local AI-assisted CSV/Excel transformation tool that turns natural-language data tasks into sandboxed, validated pandas executions.
 
-## What It Does
+It supports both single-file transformations and named two-file workflows such as joins and merges, while keeping generated code behind safety checks, sandbox execution, output validation, and retry handling.
 
-SnapScript takes a user task and a local CSV or Excel file, inspects the file schema, asks an LLM to generate pandas code, safety-checks that code, executes it in a selected sandbox backend, validates the output, and returns the result through either the CLI or Streamlit UI.
+## What SnapScript Does
+
+SnapScript takes a user task plus one or two local CSV/Excel files and runs the task through a defensive AI execution pipeline:
 
 ```text
-User task + CSV/Excel file
+User task + CSV/Excel input(s)
   -> schema inspection
-  -> schema-aware prompt
+  -> schema-aware prompt construction
   -> LLM-generated pandas code
   -> AST safety check
-  -> sandbox execution
+  -> sandbox backend selection
+  -> subprocess or Docker execution
   -> output validation
   -> retry/fallback handling
-  -> Streamlit/CLI result
+  -> CLI or Streamlit result
 ```
+
+Generated code is treated as untrusted. It is never executed directly from the CLI or Streamlit UI.
 
 ## Why It Is Interesting
 
-SnapScript is not just a chat wrapper around a data file. It treats generated code as untrusted and routes it through a defensive execution pipeline:
+SnapScript is not just a chat wrapper around a spreadsheet. It is designed around a safe local execution architecture:
 
-- AST-based safety checks reject unsafe imports, calls, and literal path access before execution.
-- Subprocess and Docker sandbox backends keep generated code behind a core execution boundary.
-- Output is validated before being copied out to the requested path.
-- UI layers stay thin while `src/snapscript/core/` owns schema, prompt, retry, safety, sandbox, and validation behavior.
-- Streamlit audit logging stores metadata and hashes by default, not raw uploaded data, prompts, or generated code.
+- Schema-aware prompts help the LLM generate pandas code that matches the uploaded data.
+- AST-based validation rejects unsafe imports, unsafe calls, and suspicious literal path access before execution.
+- Generated code runs through a selected sandbox backend instead of directly in the interface layer.
+- Subprocess and Docker sandbox backends are both supported.
+- Docker execution is opt-in and adds container isolation, network denial, memory limits, CPU limits, PID limits, and temporary workspace mounting.
+- Output files must be present, non-empty, and readable before they are exposed to the user.
+- CLI and Streamlit stay thin; core logic lives under `src/snapscript/core/`.
+- Streamlit audit logging stores local metadata and hashes by default, not raw uploaded data, full prompts, or generated code.
 
-## Features
+## Current Features
 
 - Natural-language CSV/Excel transformations
-- CSV, XLSX, and XLS support where implemented by the current pandas/openpyxl/xlrd stack
-- Schema inspection and schema-aware prompt construction
-- Anthropic Claude code generation with retry and fallback model logic
+- Single-file CSV, XLSX, and XLS workflows
+- Named two-file input workflows for joins and merges
+- CLI support for repeated named `--file` inputs
+- Streamlit support for single-file and two-file upload flows
+- Schema inspection for CSV/Excel inputs
+- Multi-file schema-aware prompt construction
+- Anthropic Claude code generation with retry and fallback model support
 - AST safety checker for generated Python
 - Subprocess sandbox backend
 - Docker sandbox backend
-- Output validation for missing, empty, or unreadable results
-- CLI interface
-- Streamlit interface
-- Safe audit logging with metadata and hashes by default
+- Runtime sandbox backend display in the Streamlit sidebar
+- Output validation before copy-out, preview, or download
+- Redacted user-facing errors
+- Streamlit session rate limiting and cooldowns
+- Metadata-only local audit logging for accepted Streamlit Generate runs
 
 ## Architecture
 
@@ -55,12 +68,30 @@ CLI / Streamlit
           -> subprocess sandbox
           -> Docker sandbox
       -> output validation
-  -> audit_logger
+  -> audit_logger where applicable
 ```
 
-Core modules live under `src/snapscript/core`. Interface code lives under `src/snapscript/interfaces`.
+Core modules live under:
 
-Generated code never runs directly from the CLI or Streamlit UI. `retry_handler.run(...)` remains the high-level safe execution path, and `execution_backend.execute(...)` selects the subprocess or Docker sandbox based on `AppConfig.sandbox_backend`.
+```text
+src/snapscript/core/
+```
+
+Interface modules live under:
+
+```text
+src/snapscript/interfaces/
+```
+
+Important boundaries:
+
+- Interface layers do not call provider SDKs directly.
+- Interface layers do not execute generated code directly.
+- Generated code must pass `safety_checker.check(...)` before sandbox execution.
+- `retry_handler.run(...)` remains the high-level safe execution path.
+- `execution_backend.execute(...)` selects the configured sandbox backend.
+- Real input paths are not injected into generated code.
+- `_snapscript_paths.py` provides safe workspace paths through `INPUT_PATH`, `INPUT_PATHS`, and `OUTPUT_PATH`.
 
 ## Installation
 
@@ -74,7 +105,9 @@ SnapScript is a Python 3.10+ project managed with `uv`.
 
 ## Environment Setup
 
-SnapScript currently implements Anthropic Claude as the real provider. Normal tests do not require a provider API key.
+SnapScript currently implements Anthropic Claude as the real LLM provider.
+
+Normal tests do not require provider credentials. Real-provider CLI or Streamlit runs require `ANTHROPIC_API_KEY`.
 
 Option A: export the key in your shell.
 
@@ -82,7 +115,7 @@ Option A: export the key in your shell.
 export ANTHROPIC_API_KEY="your_anthropic_api_key_here"
 ```
 
-Option B: create a local `.env` file, edit it, and load it into your shell before running provider-backed commands.
+Option B: use a local `.env` file.
 
 ```bash
 cp .env.example .env
@@ -92,17 +125,17 @@ source .env
 set +a
 ```
 
-Do not commit `.env` or real API keys. Real-provider tests are opt-in and consume provider API credits.
+Do not commit `.env` or real API keys.
 
 ## CLI Usage
 
-Show CLI options:
+Show CLI help:
 
 ```bash
 uv run python main.py --help
 ```
 
-Run with the default subprocess backend:
+### Single-file transformation
 
 ```bash
 uv run python main.py \
@@ -112,17 +145,20 @@ uv run python main.py \
   --yes
 ```
 
-Run with the Docker backend:
+### Two-file join or merge
+
+Phase 4A adds named two-file input support. Use repeated `--file` arguments with logical names:
 
 ```bash
-docker build -t snapscript-sandbox:local docker/sandbox
-
-SNAPSCRIPT_SANDBOX_BACKEND=docker uv run python main.py \
-  "Keep only orders where amount is greater than 1000." \
-  --file tests/fixtures/integration/task_02_orders.csv \
-  --output /tmp/orders_over_1000.csv \
+uv run python main.py \
+  "Merge orders and products using the pid column with an inner join." \
+  --file orders=tests/fixtures/integration/orders.csv \
+  --file products=tests/fixtures/integration/products.csv \
+  --output /tmp/orders_with_products.csv \
   --yes
 ```
+
+Logical names should be lowercase identifiers such as `orders`, `products`, or `customers_2025`.
 
 ## Streamlit Usage
 
@@ -130,35 +166,61 @@ SNAPSCRIPT_SANDBOX_BACKEND=docker uv run python main.py \
 uv run streamlit run app.py
 ```
 
-The Streamlit interface supports local upload, task entry, output preview, download, rate limiting, redacted errors, and metadata-only audit logging.
+The Streamlit app supports:
+
+- Single-file upload
+- Two-file upload with logical input names
+- Natural-language task entry
+- Generate button as the only transformation trigger
+- Output preview
+- Download button after successful validation
+- Session run limit and cooldown
+- Redacted errors
+- Local metadata-only audit logging
+- Sidebar display of the selected sandbox backend
 
 ## Docker Sandbox Usage
 
-The Docker backend is opt-in. The default backend remains `subprocess`.
+The default backend is `subprocess`.
 
-Build the sandbox image:
+The Docker backend is opt-in:
 
 ```bash
 docker build -t snapscript-sandbox:local docker/sandbox
-```
-
-Opt in for a shell session:
-
-```bash
 export SNAPSCRIPT_SANDBOX_BACKEND=docker
 ```
 
-Docker Desktop or Docker Engine must be running. See [docs/docker_sandbox.md](docs/docker_sandbox.md) for runtime restrictions, workspace permissions, and troubleshooting.
+Run the CLI with Docker enabled:
+
+```bash
+SNAPSCRIPT_SANDBOX_BACKEND=docker uv run python main.py \
+  "Keep only orders where amount is greater than 1000." \
+  --file tests/fixtures/integration/task_02_orders.csv \
+  --output /tmp/orders_over_1000.csv \
+  --yes
+```
+
+Docker Desktop or Docker Engine must be running.
+
+See `docs/docker_sandbox.md` for image details, runtime restrictions, workspace permissions, and troubleshooting.
 
 ## Testing
 
-Normal test runs are provider-free and Docker-free by default:
+Normal tests are provider-free and Docker-free by default:
 
 ```bash
 uv run pytest
 env -u ANTHROPIC_API_KEY uv run pytest
 uv run python main.py --help
-SNAPSCRIPT_SANDBOX_BACKEND=subprocess uv run pytest
+```
+
+Focused Phase 4A checks:
+
+```bash
+uv run pytest tests/test_schema_inspector.py tests/test_prompt_builder.py
+uv run pytest tests/test_sandbox_executor.py tests/test_docker_sandbox_executor.py tests/test_execution_backend.py tests/test_retry_handler.py
+uv run pytest tests/test_cli.py tests/test_streamlit_app.py tests/test_streamlit_pipeline_integration.py
+uv run pytest tests/integration/test_multi_file_join.py
 ```
 
 Docker-focused checks:
@@ -180,24 +242,28 @@ Optional real-provider Docker gate:
 SNAPSCRIPT_REAL_PROVIDER=1 SNAPSCRIPT_SANDBOX_BACKEND=docker uv run pytest tests/integration/test_cli_gate_tasks.py
 ```
 
-Real-provider gates are opt-in and consume Anthropic API credits.
+Real-provider gates are opt-in and consume provider API credits.
 
 ## Security Model
 
 Generated code is treated as untrusted.
 
-- Generated code must pass `safety_checker.check(...)` before execution.
-- Generated code runs through the selected sandbox backend.
-- The Docker backend adds container runtime isolation.
-- Docker disables network access by default with `--network none`.
+SnapScript applies multiple layers of defense:
+
+- Generated code must pass AST safety validation before execution.
+- Unsafe imports, unsafe calls, and unsafe literal path access are rejected.
+- Generated scripts use `_snapscript_paths.py` for safe path injection.
+- Real user paths are not inserted into generated code.
+- Generated code runs through a selected sandbox backend.
+- Docker sandbox execution disables network access by default.
 - Docker applies memory, CPU, and PID limits.
 - Docker mounts only a per-run temporary workspace.
-- Workspace permissions are prepared only inside that per-run temporary workspace so the non-root container user can read copied inputs/scripts and write output.
-- Output must exist, be non-empty, and be readable before it is copied out.
-- Streamlit audit logging stores metadata and hashes by default.
-- Raw datasets, prompts, generated code, API keys, `.env` contents, environment variables, secrets, and full tracebacks are not logged by default.
+- Docker does not mount the repository root or user home directory.
+- Output must exist, be non-empty, and be readable before it is copied out or exposed.
+- Streamlit audit logs store metadata and hashes by default.
+- Raw uploaded datasets, prompts, generated code, API keys, `.env` contents, environment variables, secrets, and full tracebacks are not logged by default.
 
-This is a local developer tool, not a formal security boundary for hostile multi-tenant workloads.
+SnapScript is a local developer tool. It is not a formal production-grade security boundary for hostile multi-tenant workloads.
 
 ## Supported Providers
 
@@ -215,18 +281,28 @@ Those future adapters are not implemented today.
 
 ## Limitations
 
-- SnapScript is local-first, not a hosted multi-user app.
-- Docker backend use requires Docker installed, running, and the sandbox image built.
-- Generated code execution is constrained, but this is not a replacement for a production multi-tenant isolation system.
-- No public hosted demo is included.
+- SnapScript is local-first, not a hosted multi-user product.
+- Docker backend requires Docker installed, running, and the sandbox image built.
+- Phase 4A supports at most two input files.
+- Multi-file workflows are named input workflows, not a full relational query planner.
+- SnapScript does not parse natural-language joins itself; it provides schema context and safe file abstractions to the LLM.
 - Tauri desktop app and MCP server work are deferred.
-- No cloud execution, auth, billing, team workspace, dashboard, web scraping, database connector, or multi-file pipeline support is included.
+- No cloud execution, auth, billing, team workspace, dashboard, web scraping, or database connector is included.
 
-## Roadmap / Future Work
+## Roadmap
+
+Near-term:
+
+- Phase 4B Prompt Assistant
+  - Rule-based Prompt Coach
+  - LLM-based task rewrite helper
+  - Streamlit task improvement UI
+
+Future:
 
 - Local JSON command interface
 - Tauri desktop shell
 - MCP server
 - Additional provider adapters
-- More sandbox hardening, such as a read-only root filesystem with explicit tmpfs mounts after smoke tests
-- More file workflows
+- More sandbox hardening, such as read-only root filesystem plus explicit tmpfs mounts
+- More file workflows beyond the current two-file Phase 4A limit
