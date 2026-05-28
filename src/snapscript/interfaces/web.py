@@ -5,7 +5,9 @@ Streamlit UI
 from __future__ import annotations
 
 from collections.abc import MutableMapping
+from datetime import datetime, timezone
 from io import BytesIO
+import json
 from pathlib import Path, PureWindowsPath
 import re
 import tempfile
@@ -35,6 +37,8 @@ from snapscript.core.models import (
 
 MAX_RUNS_PER_SESSION = 10
 COOLDOWN_SECONDS = 5
+MAX_REWRITES_PER_SESSION = 10
+REWRITE_COOLDOWN_SECONDS = 3
 ALLOWED_UPLOAD_SUFFIXES = {".csv", ".xlsx", ".xls"}
 MAX_UPLOAD_BYTES = 10 * 1024 * 1024
 PREVIEW_MAX_ROWS = 100
@@ -89,6 +93,8 @@ SESSION_DEFAULTS: dict[str, object] = {
     "rewritten_task": None,
     "rewrite_error_message": None,
     "is_rewriting_task": False,
+    "rewrite_count": 0,
+    "last_rewrite_timestamp": None,
     "run_count": 0,
     "last_run_timestamp": None,
     "is_running": False,
@@ -194,6 +200,45 @@ def check_rate_limit(
             return False, f"Please wait {remaining:.1f}s before running again."
 
     return True, None
+
+
+def get_remaining_rewrites(
+    rewrite_count: int,
+    max_rewrites: int = MAX_REWRITES_PER_SESSION,
+) -> int:
+    return max(0, max_rewrites - rewrite_count)
+
+
+def check_rewrite_rate_limit(
+    rewrite_count: int,
+    last_rewrite_timestamp: float | None,
+    now: float,
+    max_rewrites: int = MAX_REWRITES_PER_SESSION,
+    cooldown_seconds: int = REWRITE_COOLDOWN_SECONDS,
+) -> tuple[bool, str | None]:
+    if rewrite_count >= max_rewrites:
+        return False, "Rewrite limit reached for this session."
+
+    if last_rewrite_timestamp is not None:
+        elapsed = now - last_rewrite_timestamp
+        remaining = cooldown_seconds - elapsed
+        if remaining > 0:
+            return (
+                False,
+                f"Please wait {remaining:.1f}s before improving the task again.",
+            )
+
+    return True, None
+
+
+def begin_accepted_rewrite(
+    state: MutableMapping[str, object],
+    now: float,
+) -> None:
+    state["rewrite_error_message"] = None
+    state["rewrite_count"] = int(state.get("rewrite_count", 0)) + 1
+    state["last_rewrite_timestamp"] = now
+    state["is_rewriting_task"] = True
 
 
 def redact_error_text(message: str) -> str:
@@ -602,26 +647,76 @@ def build_task_rewrite_context(
 
 
 def improve_task_with_ai(state: MutableMapping[str, object]) -> None:
-    state["rewrite_error_message"] = None
-    state["is_rewriting_task"] = True
+    task_text = str(state.get("task_text", ""))
+    config = AppConfig()
+    provider = config.llm_provider
+    model = config.default_model
+    schema_summary: dict[str, object] | None = None
+    rewritten_task_text: str | None = None
+    success = False
+    provider_called = False
+    error_category: str | None = None
+    audit_accepted = bool(state.get("is_rewriting_task", False))
+    start = time.monotonic()
 
     try:
         task_text = validate_task_text(str(state.get("task_text", "")))
         schema, advice = build_task_rewrite_context(state)
+        schema_summary = _schema_summary_for_task_rewrite_audit(schema)
     except (ValueError, OSError, schema_inspector.SchemaInspectionError):
         state["rewritten_task"] = None
         state["rewrite_error_message"] = TASK_REWRITE_INPUT_ERROR_MESSAGE
+        error_category = "input_validation"
     else:
         rewriter = _task_rewriter_module()
+        provider_called = True
         try:
             rewritten = rewriter.rewrite_task(task_text, schema, advice=advice)
-        except rewriter.TaskRewriteError:
+        except rewriter.TaskRewriteError as exc:
             state["rewritten_task"] = None
-            state["rewrite_error_message"] = TASK_REWRITE_ERROR_MESSAGE
+            state["rewrite_error_message"] = _format_task_rewrite_error(exc)
+            error_category = _classify_task_rewrite_error(exc)
         else:
-            state["rewritten_task"] = rewritten.rewritten_task
+            rewritten_task_text = rewritten.rewritten_task
+            provider = rewritten.provider
+            model = rewritten.model
+            state["rewritten_task"] = rewritten_task_text
+            state["rewrite_error_message"] = None
+            success = True
     finally:
+        duration_ms = int((time.monotonic() - start) * 1000)
+        if audit_accepted:
+            _write_task_rewrite_audit_event(
+                duration_ms=duration_ms,
+                provider=provider,
+                model=model,
+                provider_called=provider_called,
+                success=success,
+                original_task=task_text,
+                rewritten_task=rewritten_task_text,
+                schema_summary=schema_summary,
+                error_category=error_category,
+            )
         state["is_rewriting_task"] = False
+
+
+def _format_task_rewrite_error(exc: Exception) -> str:
+    message = str(exc).lower()
+    if "timeout" in message or "rate" in message:
+        return (
+            "Could not improve the task right now. "
+            "Try again later or edit the task manually."
+        )
+    return TASK_REWRITE_ERROR_MESSAGE
+
+
+def _classify_task_rewrite_error(exc: Exception) -> str:
+    message = str(exc).lower()
+    if "timeout" in message:
+        return "provider_timeout"
+    if "rate" in message:
+        return "provider_rate_limit"
+    return "provider_failure"
 
 
 def _inspect_single_file_prompt_coach_schema(
@@ -727,12 +822,46 @@ def render_prompt_coach(state: MutableMapping[str, object]) -> None:
 
 def render_ai_rewrite_controls(state: MutableMapping[str, object]) -> None:
     st.subheader("AI Task Rewrite")
+    remaining_rewrites = get_remaining_rewrites(
+        int(state.get("rewrite_count", 0))
+    )
+    st.caption(f"Remaining AI rewrites this session: {remaining_rewrites}")
     can_rewrite, _disabled_reason = can_improve_task(state)
+    rewrite_limit_reached = (
+        int(state.get("rewrite_count", 0)) >= MAX_REWRITES_PER_SESSION
+    )
+    if rewrite_limit_reached:
+        state["rewrite_error_message"] = "Rewrite limit reached for this session."
     rewrite_disabled = (
-        not can_rewrite or bool(state.get("is_rewriting_task", False))
+        not can_rewrite
+        or rewrite_limit_reached
+        or bool(state.get("is_rewriting_task", False))
     )
     if st.button("Improve task with AI", disabled=rewrite_disabled):
-        improve_task_with_ai(state)
+        can_rewrite, validation_error = can_improve_task(state)
+        if not can_rewrite:
+            state["rewrite_error_message"] = (
+                validation_error or TASK_REWRITE_INPUT_ERROR_MESSAGE
+            )
+        else:
+            now = time.monotonic()
+            last_rewrite_timestamp = state.get("last_rewrite_timestamp")
+            accepted, rate_limit_error = check_rewrite_rate_limit(
+                int(state.get("rewrite_count", 0)),
+                (
+                    float(last_rewrite_timestamp)
+                    if last_rewrite_timestamp is not None
+                    else None
+                ),
+                now,
+            )
+            if not accepted:
+                state["rewrite_error_message"] = (
+                    rate_limit_error or "Cannot improve the task."
+                )
+            else:
+                begin_accepted_rewrite(state, now)
+                improve_task_with_ai(state)
 
     rewrite_error = state.get("rewrite_error_message")
     if rewrite_error:
@@ -831,6 +960,60 @@ def _multi_schema_summary_for_audit(
             for file_schema in multi_schema.files
         ]
     }
+
+
+def _schema_summary_for_task_rewrite_audit(
+    schema: SchemaReport | MultiFileSchemaReport,
+) -> dict[str, object]:
+    if isinstance(schema, MultiFileSchemaReport):
+        return _multi_schema_summary_for_audit(schema)
+    return _schema_summary_for_audit(schema)
+
+
+def _sha256_safe_json(value: object) -> str:
+    safe_value = audit_logger.safe_json_value(value)
+    serialized = json.dumps(safe_value, sort_keys=True)
+    return audit_logger.sha256_text(serialized)
+
+
+def _write_task_rewrite_audit_event(
+    *,
+    duration_ms: int,
+    provider: str,
+    model: str,
+    provider_called: bool,
+    success: bool,
+    original_task: str,
+    rewritten_task: str | None,
+    schema_summary: object | None,
+    error_category: str | None,
+) -> None:
+    event: dict[str, object] = {
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "run_id": uuid.uuid4().hex,
+        "event_type": "task_rewrite",
+        "interface": AUDIT_INTERFACE,
+        "provider": provider,
+        "model": model,
+        "success": success,
+        "duration_ms": duration_ms,
+        "provider_called": provider_called,
+        "original_task_sha256": (
+            audit_logger.sha256_text(original_task) if original_task else None
+        ),
+        "rewritten_task_sha256": (
+            audit_logger.sha256_text(rewritten_task)
+            if success and rewritten_task
+            else None
+        ),
+        "schema_summary_sha256": (
+            _sha256_safe_json(schema_summary)
+            if schema_summary is not None
+            else None
+        ),
+        "error_category": error_category,
+    }
+    audit_logger.write_audit_event_best_effort(event, log_path=AUDIT_LOG_PATH)
 
 
 def _prompt_text_for_audit(prompt: PromptPayload) -> str:
