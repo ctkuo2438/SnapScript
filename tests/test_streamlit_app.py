@@ -14,6 +14,7 @@ from snapscript.core.models import (
     NamedSchemaReport,
     PromptPayload,
     SchemaReport,
+    TaskAdvice,
 )
 from snapscript.interfaces import web
 
@@ -80,6 +81,7 @@ class FakeStreamlit:
         second_uploaded_file: FakeUploadedFile | None = None,
         first_logical_name: str = "",
         second_logical_name: str = "",
+        clicked_buttons: set[str] | None = None,
     ) -> None:
         self.session_state: dict[str, object] = {}
         self.calls: list[
@@ -93,6 +95,7 @@ class FakeStreamlit:
         self.second_uploaded_file = second_uploaded_file
         self.first_logical_name = first_logical_name
         self.second_logical_name = second_logical_name
+        self.clicked_buttons = clicked_buttons or set()
         self.sidebar = FakeSidebar(self)
 
     def title(self, *args: object, **kwargs: object) -> None:
@@ -131,7 +134,11 @@ class FakeStreamlit:
 
     def button(self, *args: object, **kwargs: object) -> bool:
         self.calls.append(("button", args, kwargs))
-        return self.button_clicked and not bool(kwargs.get("disabled", False))
+        label = str(args[0]) if args else ""
+        clicked = label in self.clicked_buttons or (
+            self.button_clicked and label == "Generate"
+        )
+        return clicked and not bool(kwargs.get("disabled", False))
 
     def caption(self, *args: object, **kwargs: object) -> None:
         self.calls.append(("caption", args, kwargs))
@@ -141,6 +148,9 @@ class FakeStreamlit:
 
     def info(self, *args: object, **kwargs: object) -> None:
         self.calls.append(("info", args, kwargs))
+
+    def warning(self, *args: object, **kwargs: object) -> None:
+        self.calls.append(("warning", args, kwargs))
 
     def error(self, *args: object, **kwargs: object) -> None:
         self.calls.append(("error", args, kwargs))
@@ -181,7 +191,11 @@ def _multi_schema() -> MultiFileSchemaReport:
 def _button_disabled(
     calls: list[tuple[str, tuple[object, ...], dict[str, object]]],
 ) -> bool:
-    button_calls = [kwargs for name, _args, kwargs in calls if name == "button"]
+    button_calls = [
+        kwargs
+        for name, args, kwargs in calls
+        if name == "button" and args and args[0] == "Generate"
+    ]
     assert len(button_calls) == 1
     return bool(button_calls[0].get("disabled", False))
 
@@ -194,6 +208,16 @@ def _has_placeholder_message(
         ("Generation is not wired yet. This is the Phase 2 skeleton.",),
         {},
     ) in calls
+
+
+def _rendered_text(
+    calls: list[tuple[str, tuple[object, ...], dict[str, object]]],
+) -> str:
+    return "\n".join(
+        str(arg)
+        for _name, args, _kwargs in calls
+        for arg in args
+    )
 
 
 def test_app_entrypoint_only_delegates_to_web_main() -> None:
@@ -857,6 +881,203 @@ def test_main_generate_click_validates_then_calls_pipeline_helper(
         )
     ]
     assert not _has_placeholder_message(fake_st.calls)
+
+
+def test_prompt_coach_renders_for_single_file_after_task_and_schema(
+    monkeypatch,
+) -> None:
+    uploaded = FakeUploadedFile("orders.csv", b"order_id,amount\n1,10\n")
+    fake_st = FakeStreamlit(
+        uploaded_file=uploaded,
+        task_text="Filter rows where amount is greater than 1000",
+    )
+    seen: dict[str, object] = {}
+    monkeypatch.setattr(web, "st", fake_st)
+    monkeypatch.setattr(web.schema_inspector, "inspect", lambda _path: _schema())
+    monkeypatch.setattr(
+        web.task_advisor,
+        "advise_task",
+        lambda task_text, schema: (
+            seen.update({"task_text": task_text, "schema": schema})
+            or TaskAdvice(
+                quality="good",
+                missing_details=[],
+                suggestions=["Task looks clear."],
+            )
+        ),
+    )
+
+    web.main()
+
+    rendered = _rendered_text(fake_st.calls)
+    assert "Prompt Coach" in rendered
+    assert "Status: Good" in rendered
+    assert "Task looks clear." in rendered
+    assert seen["task_text"] == "Filter rows where amount is greater than 1000"
+    assert isinstance(seen["schema"], SchemaReport)
+
+
+def test_prompt_coach_renders_for_two_file_mode_after_task_and_schema(
+    monkeypatch,
+) -> None:
+    fake_st = FakeStreamlit(
+        input_mode="Two files",
+        first_uploaded_file=FakeUploadedFile("orders.csv", b"order_id,pid\n1,p1\n"),
+        second_uploaded_file=FakeUploadedFile("products.csv", b"pid,name\np1,x\n"),
+        first_logical_name="orders",
+        second_logical_name="products",
+        task_text="merge these files",
+    )
+    seen: dict[str, object] = {}
+    monkeypatch.setattr(web, "st", fake_st)
+    monkeypatch.setattr(
+        web.schema_inspector,
+        "inspect_many",
+        lambda specs: (
+            seen.update({"specs": specs})
+            or _multi_schema()
+        ),
+    )
+    monkeypatch.setattr(
+        web.task_advisor,
+        "advise_task",
+        lambda task_text, schema: (
+            seen.update({"task_text": task_text, "schema": schema})
+            or TaskAdvice(
+                quality="needs_detail",
+                missing_details=["join key", "join type"],
+                suggestions=["Name the shared column and join type."],
+                suggested_task=(
+                    "Merge orders and products using pid with a left join."
+                ),
+            )
+        ),
+    )
+
+    web.main()
+
+    rendered = _rendered_text(fake_st.calls)
+    assert "Prompt Coach" in rendered
+    assert "Status: Needs Detail" in rendered
+    assert "join key" in rendered
+    assert "join type" in rendered
+    assert "Name the shared column and join type." in rendered
+    assert "Merge orders and products using pid with a left join." in rendered
+    assert _button_disabled(fake_st.calls) is False
+    assert [spec.name for spec in seen["specs"]] == ["orders", "products"]
+    assert isinstance(seen["schema"], MultiFileSchemaReport)
+
+
+def test_prompt_coach_too_vague_advice_does_not_disable_generate(
+    monkeypatch,
+) -> None:
+    uploaded = FakeUploadedFile("orders.csv", b"order_id,amount\n1,10\n")
+    fake_st = FakeStreamlit(
+        uploaded_file=uploaded,
+        task_text="clean this",
+    )
+    monkeypatch.setattr(web, "st", fake_st)
+    monkeypatch.setattr(web.schema_inspector, "inspect", lambda _path: _schema())
+    monkeypatch.setattr(
+        web.task_advisor,
+        "advise_task",
+        lambda _task_text, _schema: TaskAdvice(
+            quality="too_vague",
+            missing_details=["desired operation"],
+            suggestions=["Describe what should change."],
+        ),
+    )
+
+    web.main()
+
+    assert _button_disabled(fake_st.calls) is False
+    rendered = _rendered_text(fake_st.calls)
+    assert "Status: Too Vague" in rendered
+    assert "desired operation" in rendered
+
+
+def test_prompt_coach_rendering_does_not_call_execution_pipeline(
+    monkeypatch,
+) -> None:
+    uploaded = FakeUploadedFile("orders.csv", b"order_id,amount\n1,10\n")
+    fake_st = FakeStreamlit(
+        uploaded_file=uploaded,
+        task_text="Filter rows where amount is greater than 1000",
+    )
+    monkeypatch.setattr(web, "st", fake_st)
+    monkeypatch.setattr(web.schema_inspector, "inspect", lambda _path: _schema())
+    monkeypatch.setattr(
+        web.task_advisor,
+        "advise_task",
+        lambda _task_text, _schema: TaskAdvice(
+            quality="good",
+            missing_details=[],
+            suggestions=[],
+        ),
+    )
+    monkeypatch.setattr(
+        web.prompt_builder,
+        "build",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("prompt_builder.build must not be called")
+        ),
+    )
+    monkeypatch.setattr(
+        web.retry_handler,
+        "run",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("retry_handler.run must not be called")
+        ),
+    )
+
+    web.main()
+
+    assert fake_st.session_state["result_preview"] is None
+    assert fake_st.session_state["output_bytes"] is None
+    assert fake_st.session_state["output_file_name"] is None
+    assert not any(name == "download_button" for name, _args, _kwargs in fake_st.calls)
+
+
+def test_use_suggested_task_updates_only_task_text(
+    monkeypatch,
+) -> None:
+    uploaded = FakeUploadedFile("orders.csv", b"order_id,amount\n1,10\n")
+    previous_preview = pd.DataFrame({"old": [1]})
+    fake_st = FakeStreamlit(
+        uploaded_file=uploaded,
+        task_text="clean this",
+        clicked_buttons={"Use suggested task"},
+    )
+    fake_st.session_state.update(
+        {
+            "result_preview": previous_preview,
+            "output_bytes": b"old",
+            "output_file_name": "old.csv",
+            "run_count": 3,
+        }
+    )
+    monkeypatch.setattr(web, "st", fake_st)
+    monkeypatch.setattr(web.schema_inspector, "inspect", lambda _path: _schema())
+    monkeypatch.setattr(
+        web.task_advisor,
+        "advise_task",
+        lambda _task_text, _schema: TaskAdvice(
+            quality="needs_detail",
+            missing_details=["target column"],
+            suggestions=["Mention the column to use."],
+            suggested_task="Filter rows where amount is greater than 1000.",
+        ),
+    )
+
+    web.main()
+
+    assert fake_st.session_state["task_text"] == (
+        "Filter rows where amount is greater than 1000."
+    )
+    assert fake_st.session_state["result_preview"] is previous_preview
+    assert fake_st.session_state["output_bytes"] == b"old"
+    assert fake_st.session_state["output_file_name"] == "old.csv"
+    assert fake_st.session_state["run_count"] == 3
 
 
 def test_run_uploaded_tasks_many_calls_multi_file_core_flow_with_temp_paths(
@@ -1859,6 +2080,7 @@ def test_web_imports_streamlit_and_retry_but_not_provider_or_sandbox() -> None:
     assert "anthropic" not in source
     assert "code_generator" not in source
     assert "safety_checker" not in source
+    assert "execution_backend" not in source
     assert "sandbox_executor" not in source
     assert ".generate(" not in source
     assert ".execute(" not in source

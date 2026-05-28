@@ -16,13 +16,20 @@ import pandas as pd
 import streamlit as st
 
 from snapscript.config import AppConfig
-from snapscript.core import audit_logger, prompt_builder, retry_handler, schema_inspector
+from snapscript.core import (
+    audit_logger,
+    prompt_builder,
+    retry_handler,
+    schema_inspector,
+    task_advisor,
+)
 from snapscript.core.models import (
     ExecutionResult,
     InputFileSpec,
     MultiFileSchemaReport,
     PromptPayload,
     SchemaReport,
+    TaskAdvice,
 )
 
 
@@ -501,6 +508,136 @@ def write_named_upload_to_temp_input(
     return input_path
 
 
+def build_prompt_coach_advice(
+    state: MutableMapping[str, object],
+) -> TaskAdvice | None:
+    task_text = str(state.get("task_text", ""))
+    if not normalize_task_text(task_text):
+        return None
+
+    try:
+        if str(state.get("input_mode", INPUT_MODE_SINGLE)) == INPUT_MODE_TWO:
+            schema = _inspect_two_file_prompt_coach_schema(state)
+        else:
+            schema = _inspect_single_file_prompt_coach_schema(state)
+    except (ValueError, OSError, schema_inspector.SchemaInspectionError):
+        return None
+
+    return task_advisor.advise_task(task_text, schema)
+
+
+def _inspect_single_file_prompt_coach_schema(
+    state: MutableMapping[str, object],
+) -> SchemaReport:
+    if (
+        state.get("uploaded_file_bytes") is None
+        or state.get("uploaded_file_suffix") is None
+    ):
+        raise ValueError("Upload is required for Prompt Coach.")
+
+    with tempfile.TemporaryDirectory(prefix="snapscript_web_coach_") as temp_name:
+        temp_dir = Path(temp_name).resolve()
+        input_path = write_upload_to_temp_input(
+            temp_dir,
+            bytes(state["uploaded_file_bytes"]),
+            str(state["uploaded_file_suffix"]),
+        )
+        return schema_inspector.inspect(input_path)
+
+
+def _inspect_two_file_prompt_coach_schema(
+    state: MutableMapping[str, object],
+) -> MultiFileSchemaReport:
+    if (
+        state.get("first_uploaded_file_bytes") is None
+        or state.get("first_uploaded_file_suffix") is None
+        or state.get("second_uploaded_file_bytes") is None
+        or state.get("second_uploaded_file_suffix") is None
+    ):
+        raise ValueError("Both uploads are required for Prompt Coach.")
+
+    validated_inputs = schema_inspector.validate_input_specs(
+        [
+            InputFileSpec(
+                name=str(state.get("first_logical_name", "")),
+                path=Path("first_input"),
+            ),
+            InputFileSpec(
+                name=str(state.get("second_logical_name", "")),
+                path=Path("second_input"),
+            ),
+        ]
+    )
+    with tempfile.TemporaryDirectory(prefix="snapscript_web_coach_") as temp_name:
+        temp_dir = Path(temp_name).resolve()
+        input_specs = [
+            InputFileSpec(
+                name=validated_inputs[0].name,
+                path=write_named_upload_to_temp_input(
+                    temp_dir,
+                    bytes(state["first_uploaded_file_bytes"]),
+                    str(state["first_uploaded_file_suffix"]),
+                    validated_inputs[0].name,
+                    1,
+                ),
+                display_filename=(
+                    str(state["first_uploaded_file_name"])
+                    if state.get("first_uploaded_file_name") is not None
+                    else None
+                ),
+            ),
+            InputFileSpec(
+                name=validated_inputs[1].name,
+                path=write_named_upload_to_temp_input(
+                    temp_dir,
+                    bytes(state["second_uploaded_file_bytes"]),
+                    str(state["second_uploaded_file_suffix"]),
+                    validated_inputs[1].name,
+                    2,
+                ),
+                display_filename=(
+                    str(state["second_uploaded_file_name"])
+                    if state.get("second_uploaded_file_name") is not None
+                    else None
+                ),
+            ),
+        ]
+        return schema_inspector.inspect_many(input_specs)
+
+
+def render_prompt_coach(state: MutableMapping[str, object]) -> None:
+    advice = build_prompt_coach_advice(state)
+    if advice is None:
+        return
+
+    st.subheader("Prompt Coach")
+    _render_prompt_coach_status(advice)
+    if advice.missing_details:
+        st.write("Missing details:")
+        for detail in advice.missing_details:
+            st.write(f"- {detail}")
+    if advice.suggestions:
+        st.write("Suggestions:")
+        for suggestion in advice.suggestions:
+            st.write(f"- {suggestion}")
+    if advice.suggested_task:
+        st.write("Suggested task:")
+        st.write(advice.suggested_task)
+        if st.button("Use suggested task"):
+            state["task_text"] = advice.suggested_task
+
+
+def _render_prompt_coach_status(advice: TaskAdvice) -> None:
+    status = advice.quality.replace("_", " ").title()
+    message = f"Status: {status}"
+    if advice.quality == "good":
+        st.success(message)
+    elif advice.quality == "too_vague":
+        st.warning(message)
+    else:
+        st.info(message)
+
+
 def derive_output_file_name(
     uploaded_file_name: str | None,
     suffix: str,
@@ -892,6 +1029,8 @@ def main() -> None:
         value=str(st.session_state["task_text"]),
     )
     st.session_state["task_text"] = task_text
+
+    render_prompt_coach(st.session_state)
 
     remaining_runs = get_remaining_runs(int(st.session_state["run_count"]))
     st.caption(f"Remaining runs this session: {remaining_runs}")
