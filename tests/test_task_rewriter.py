@@ -158,6 +158,21 @@ def test_prompt_does_not_include_real_file_paths(
     assert "orders.csv" not in user_prompt
 
 
+def test_prompt_does_not_include_uploaded_display_filenames(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[dict[str, str]] = []
+    _mock_provider(monkeypatch, "Filter rows where amount is greater than 1000.", calls)
+    schema = _single_schema()
+    schema.filename = "customer_upload_2026.csv"
+
+    rewrite_task("filter customer_upload_2026.csv", schema)
+
+    user_prompt = calls[0]["user_prompt"]
+    assert "customer_upload_2026.csv" not in user_prompt
+    assert "[file]" in user_prompt
+
+
 def test_prompt_redacts_paths_from_original_task(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -310,6 +325,7 @@ def test_task_rewriter_has_no_execution_pipeline_imports_or_calls() -> None:
     assert "streamlit" not in source
     assert "argparse" not in source
     assert "rich" not in source
+    assert "prompt_builder" not in source
     assert "retry_handler" not in source
     assert "safety_checker" not in source
     assert "execution_backend" not in source
@@ -342,6 +358,18 @@ def test_rewritten_task_rejects_file_names(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _mock_provider(monkeypatch, "Filter rows in orders.csv where amount is greater than 1000.")
+
+    with pytest.raises(TaskRewriteError, match="file paths"):
+        rewrite_task("filter big orders", _single_schema())
+
+
+def test_rewritten_task_rejects_real_local_paths(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _mock_provider(
+        monkeypatch,
+        "Filter rows in /tmp/private/orders.csv where amount is greater than 1000.",
+    )
 
     with pytest.raises(TaskRewriteError, match="file paths"):
         rewrite_task("filter big orders", _single_schema())

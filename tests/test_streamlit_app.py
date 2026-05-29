@@ -1158,6 +1158,36 @@ def test_prompt_coach_rendering_does_not_call_execution_pipeline(
     assert not any(name == "download_button" for name, _args, _kwargs in fake_st.calls)
 
 
+def test_prompt_coach_rendering_does_not_load_task_rewriter(monkeypatch) -> None:
+    uploaded = FakeUploadedFile("orders.csv", b"order_id,amount\n1,10\n")
+    fake_st = FakeStreamlit(
+        uploaded_file=uploaded,
+        task_text="Filter rows where amount is greater than 1000",
+    )
+    monkeypatch.setattr(web, "st", fake_st)
+    monkeypatch.setattr(web.schema_inspector, "inspect", lambda _path: _schema())
+    monkeypatch.setattr(
+        web.task_advisor,
+        "advise_task",
+        lambda _task_text, _schema: TaskAdvice(
+            quality="good",
+            missing_details=[],
+            suggestions=[],
+        ),
+    )
+    monkeypatch.setattr(
+        web,
+        "_task_rewriter_module",
+        lambda: (_ for _ in ()).throw(
+            AssertionError("Prompt Coach must not load task_rewriter")
+        ),
+    )
+
+    web.main()
+
+    assert fake_st.session_state["rewritten_task"] is None
+
+
 def test_use_suggested_task_updates_only_task_text(
     monkeypatch,
 ) -> None:
@@ -1430,6 +1460,30 @@ def test_use_rewritten_task_updates_only_task_text(monkeypatch) -> None:
     assert calls == []
 
 
+def test_user_can_ignore_rewritten_task_and_keep_original_task(monkeypatch) -> None:
+    previous_preview = pd.DataFrame({"old": [1]})
+    fake_st = FakeStreamlit(task_text="clean this")
+    fake_st.session_state.update(
+        {
+            "rewritten_task": "Filter rows where amount is greater than 1000.",
+            "result_preview": previous_preview,
+            "output_bytes": b"old",
+            "output_file_name": "old.csv",
+        }
+    )
+    monkeypatch.setattr(web, "st", fake_st)
+
+    web.main()
+
+    assert fake_st.session_state["task_text"] == "clean this"
+    assert fake_st.session_state["rewritten_task"] == (
+        "Filter rows where amount is greater than 1000."
+    )
+    assert fake_st.session_state["result_preview"] is previous_preview
+    assert fake_st.session_state["output_bytes"] == b"old"
+    assert fake_st.session_state["output_file_name"] == "old.csv"
+
+
 def test_ai_rewrite_does_not_call_generate_pipeline_helpers(monkeypatch) -> None:
     uploaded = FakeUploadedFile("orders.csv", b"order_id,amount\n1,10\n")
     fake_st = FakeStreamlit(
@@ -1667,6 +1721,39 @@ def test_generate_run_count_does_not_affect_rewrite_count(monkeypatch) -> None:
 
     assert fake_st.session_state["run_count"] == 1
     assert fake_st.session_state["rewrite_count"] == 4
+
+
+def test_generate_run_limit_does_not_block_ai_rewrite(monkeypatch) -> None:
+    uploaded = FakeUploadedFile("orders.csv", b"order_id,total\n1,10\n")
+    fake_st = FakeStreamlit(
+        uploaded_file=uploaded,
+        task_text="clean this",
+        clicked_buttons={"Improve task with AI"},
+    )
+    fake_st.session_state["run_count"] = web.MAX_RUNS_PER_SESSION
+    monkeypatch.setattr(web, "st", fake_st)
+    monkeypatch.setattr(web.time, "monotonic", lambda: 600.0)
+    monkeypatch.setattr(web, "build_prompt_coach_advice", lambda _state: None)
+    monkeypatch.setattr(web.schema_inspector, "inspect", lambda _path: _schema())
+    monkeypatch.setattr(
+        web.task_advisor,
+        "advise_task",
+        lambda _task_text, _schema: TaskAdvice(
+            quality="too_vague",
+            missing_details=[],
+            suggestions=[],
+        ),
+    )
+    monkeypatch.setattr(web, "_task_rewriter_module", _fake_rewriter_module)
+
+    web.main()
+
+    assert fake_st.session_state["run_count"] == web.MAX_RUNS_PER_SESSION
+    assert fake_st.session_state["rewrite_count"] == 1
+    assert fake_st.session_state["last_rewrite_timestamp"] == 600.0
+    assert fake_st.session_state["rewritten_task"] == (
+        "Filter rows where amount is greater than 1000."
+    )
 
 
 def test_accepted_successful_rewrite_writes_metadata_only_audit_event(

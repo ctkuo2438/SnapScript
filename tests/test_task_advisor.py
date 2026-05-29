@@ -148,6 +148,37 @@ def test_multi_file_advice_uses_logical_file_names() -> None:
     assert "/tmp/private" not in advice_text
 
 
+def test_suggested_task_contains_no_code_pandas_or_real_paths() -> None:
+    advice = advise_task("merge these files", _multi_schema())
+
+    assert advice.suggested_task is not None
+    suggested = advice.suggested_task.lower()
+    assert "```" not in suggested
+    assert "import " not in suggested
+    assert "pd." not in suggested
+    assert "pandas" not in suggested
+    assert "/tmp/private" not in suggested
+    assert "orders.csv" not in suggested
+    assert "products.csv" not in suggested
+
+
+def test_task_advisor_has_no_provider_or_execution_pipeline_imports() -> None:
+    source = Path("src/snapscript/core/task_advisor.py").read_text(
+        encoding="utf-8"
+    )
+
+    assert "anthropic" not in source.lower()
+    assert "openai" not in source.lower()
+    assert "task_rewriter" not in source
+    assert "prompt_builder" not in source
+    assert "retry_handler" not in source
+    assert "safety_checker" not in source
+    assert "execution_backend" not in source
+    assert "sandbox_executor" not in source
+    assert ".generate(" not in source
+    assert ".execute(" not in source
+
+
 def test_advisor_does_not_mutate_schema_object() -> None:
     schema = _multi_schema()
     before = deepcopy(schema)
