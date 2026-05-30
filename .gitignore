@@ -18,6 +18,7 @@ build/
 !.env.example
 logs/
 *.log
+*.jsonl
 
 # macOS
 .DS_Store
