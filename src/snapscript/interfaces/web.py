@@ -680,9 +680,6 @@ def render_prompt_coach(state: MutableMapping[str, object]) -> None:
         st.write("Suggestions:")
         for suggestion in advice.suggestions:
             st.write(f"- {suggestion}")
-    if advice.suggested_task:
-        st.write("Guidance:")
-        st.write(advice.suggested_task)
 
 
 def render_ai_rewrite_controls(state: MutableMapping[str, object]) -> None:

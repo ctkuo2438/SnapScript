@@ -106,7 +106,8 @@ def test_prompt_coach_renders_for_two_file_mode_after_task_and_schema(
     assert "join key" in rendered
     assert "join type" in rendered
     assert "Name the shared column and join type." in rendered
-    assert "Merge orders and products using pid with a left join." in rendered
+    assert "Guidance:" not in rendered
+    assert "Merge orders and products using pid with a left join." not in rendered
     assert _button_disabled(fake_st.calls) is False
     assert [spec.name for spec in seen["specs"]] == ["orders", "products"]
     assert isinstance(seen["schema"], MultiFileSchemaReport)
@@ -208,7 +209,7 @@ def test_prompt_coach_rendering_does_not_load_task_rewriter(monkeypatch) -> None
 
     assert fake_st.session_state["rewritten_task"] is None
 
-def test_prompt_coach_does_not_render_use_suggested_task_button(
+def test_prompt_coach_does_not_render_guidance_or_suggested_task(
     monkeypatch,
 ) -> None:
     uploaded = FakeUploadedFile("orders.csv", b"order_id,amount\n1,10\n")
@@ -248,9 +249,9 @@ def test_prompt_coach_does_not_render_use_suggested_task_button(
     ]
     assert "Use suggested task" not in labels
     assert fake_st.session_state["task_text"] == "clean this"
-    assert "Filter rows where amount is greater than 1000." in _rendered_text(
-        fake_st.calls
-    )
+    rendered = _rendered_text(fake_st.calls)
+    assert "Guidance:" not in rendered
+    assert "Filter rows where amount is greater than 1000." not in rendered
     assert fake_st.session_state["result_preview"] is previous_preview
     assert fake_st.session_state["output_bytes"] == b"old"
     assert fake_st.session_state["output_file_name"] == "old.csv"
