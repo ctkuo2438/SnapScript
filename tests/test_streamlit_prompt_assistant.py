@@ -208,7 +208,7 @@ def test_prompt_coach_rendering_does_not_load_task_rewriter(monkeypatch) -> None
 
     assert fake_st.session_state["rewritten_task"] is None
 
-def test_use_suggested_task_updates_only_task_text(
+def test_prompt_coach_does_not_render_use_suggested_task_button(
     monkeypatch,
 ) -> None:
     uploaded = FakeUploadedFile("orders.csv", b"order_id,amount\n1,10\n")
@@ -241,8 +241,15 @@ def test_use_suggested_task_updates_only_task_text(
 
     web.main()
 
-    assert fake_st.session_state["task_text"] == (
-        "Filter rows where amount is greater than 1000."
+    labels = [
+        str(args[0])
+        for name, args, _kwargs in fake_st.calls
+        if name == "button" and args
+    ]
+    assert "Use suggested task" not in labels
+    assert fake_st.session_state["task_text"] == "clean this"
+    assert "Filter rows where amount is greater than 1000." in _rendered_text(
+        fake_st.calls
     )
     assert fake_st.session_state["result_preview"] is previous_preview
     assert fake_st.session_state["output_bytes"] == b"old"
