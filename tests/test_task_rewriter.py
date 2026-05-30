@@ -61,6 +61,35 @@ def _multi_schema() -> MultiFileSchemaReport:
     )
 
 
+def _event_schema() -> MultiFileSchemaReport:
+    events_schema = SchemaReport(
+        filename="/tmp/private/events.csv",
+        file_type="csv",
+        row_count=3,
+        file_size_bytes=128,
+        columns=[
+            ColumnInfo(name="event_id", dtype="int64"),
+            ColumnInfo(name="event_type", dtype="object"),
+        ],
+    )
+    lookup_schema = SchemaReport(
+        filename="/tmp/private/event_lookup.csv",
+        file_type="csv",
+        row_count=2,
+        file_size_bytes=128,
+        columns=[
+            ColumnInfo(name="event_type", dtype="object"),
+            ColumnInfo(name="category", dtype="object"),
+        ],
+    )
+    return MultiFileSchemaReport(
+        files=[
+            NamedSchemaReport(name="events", schema=events_schema),
+            NamedSchemaReport(name="event_lookup", schema=lookup_schema),
+        ]
+    )
+
+
 def _mock_provider(
     monkeypatch: pytest.MonkeyPatch,
     text: str,
@@ -354,6 +383,59 @@ def test_rewritten_task_rejects_invented_column(
         rewrite_task("filter discounts", _single_schema())
 
 
+def test_rewritten_task_accepts_article_before_join_column(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _mock_provider(
+        monkeypatch,
+        "Merge events and event_lookup on the event_type column with an inner join.",
+    )
+
+    rewritten = rewrite_task("merge them on event_type", _event_schema())
+
+    assert rewritten.rewritten_task == (
+        "Merge events and event_lookup on the event_type column with an inner join."
+    )
+
+
+def test_rewritten_task_accepts_using_the_join_column_phrase(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _mock_provider(
+        monkeypatch,
+        (
+            "Perform an inner join between events and event_lookup using "
+            "the event_type column. Keep all matching rows."
+        ),
+    )
+
+    rewritten = rewrite_task("merge them on event_type", _event_schema())
+
+    assert rewritten.rewritten_task == (
+        "Perform an inner join between events and event_lookup using "
+        "the event_type column. Keep all matching rows."
+    )
+
+
+def test_rewritten_task_accepts_common_join_sentence_without_false_columns(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _mock_provider(
+        monkeypatch,
+        (
+            "Perform an inner join between events and event_lookup on the "
+            "event_type column. Retain all columns from both files in the output."
+        ),
+    )
+
+    rewritten = rewrite_task("merge them on event_type", _event_schema())
+
+    assert rewritten.rewritten_task == (
+        "Perform an inner join between events and event_lookup on the "
+        "event_type column. Retain all columns from both files in the output."
+    )
+
+
 def test_rewritten_task_rejects_file_names(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -458,3 +540,22 @@ def test_call_provider_wraps_sdk_failure_without_cause(
     assert exc_info.value.__cause__ is None
     assert "sk-ant" not in str(exc_info.value)
     assert "ANTHROPIC_API_KEY" not in str(exc_info.value)
+
+
+def test_rewritten_task_accepts_join_type_words_as_non_columns(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _mock_provider(
+        monkeypatch,
+        (
+            "Perform an inner join between events and event_lookup on the "
+            "event_type column. Retain all columns from both files."
+        ),
+    )
+
+    rewritten = rewrite_task("merge them on event_type", _event_schema())
+
+    assert rewritten.rewritten_task == (
+        "Perform an inner join between events and event_lookup on the "
+        "event_type column. Retain all columns from both files."
+    )

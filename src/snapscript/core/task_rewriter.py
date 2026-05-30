@@ -43,6 +43,47 @@ FILE_NAME_PATTERN = re.compile(
     flags=re.IGNORECASE,
 )
 
+NON_COLUMN_REFERENCE_WORDS = frozenset(
+    {
+        "the",
+        "a",
+        "an",
+        "inner",
+        "left",
+        "right",
+        "outer",
+        "full",
+        "all",
+        "both",
+        "matching",
+        "matched",
+        "rows",
+        "row",
+        "columns",
+        "column",
+        "files",
+        "file",
+        "using",
+        "with",
+        "between",
+        "from",
+        "to",
+        "and",
+        "or",
+        "retain",
+        "keep",
+        "keeping",
+        "only",
+        "values",
+        "value",
+        "join",
+        "joined",
+        "output",
+        "result",
+        "results",
+    }
+)
+
 
 class TaskRewriteError(Exception):
     """Raised when task rewriting fails safely."""
@@ -221,6 +262,8 @@ def _unknown_referenced_column(
     file_names = {name.lower() for name in _schema_file_names(schema)}
     for candidate in _candidate_column_references(text):
         normalized = candidate.lower()
+        if normalized in NON_COLUMN_REFERENCE_WORDS:
+            continue
         if normalized not in valid_columns and normalized not in file_names:
             return candidate
     return None
@@ -243,12 +286,16 @@ def _schema_file_names(schema: SchemaReport | MultiFileSchemaReport) -> list[str
 
 
 def _candidate_column_references(text: str) -> list[str]:
+    optional_article = r"(?:the|a|an)\s+"
+    non_column_after_column = r"(?:with|from|to|and|or|for|in|of)\b"
     patterns = (
-        r"\bwhere\s+([A-Za-z_][A-Za-z0-9_]*)\b",
-        r"\busing\s+([A-Za-z_][A-Za-z0-9_]*)\b",
-        r"\bon\s+([A-Za-z_][A-Za-z0-9_]*)\b",
-        r"\bby\s+([A-Za-z_][A-Za-z0-9_]*)\b",
-        r"\bcolumn\s+([A-Za-z_][A-Za-z0-9_]*)\b",
+        rf"\bwhere\s+(?:{optional_article})?([A-Za-z_][A-Za-z0-9_]*)\b",
+        rf"\busing\s+(?:{optional_article})?([A-Za-z_][A-Za-z0-9_]*)\b",
+        rf"\bon\s+(?:{optional_article})?([A-Za-z_][A-Za-z0-9_]*)\b",
+        rf"\bby\s+(?:{optional_article})?([A-Za-z_][A-Za-z0-9_]*)\b",
+        rf"\bcolumn\s+(?!{non_column_after_column})"
+        rf"(?:named\s+|called\s+)?(?:{optional_article})?"
+        rf"([A-Za-z_][A-Za-z0-9_]*)\b",
     )
     candidates: list[str] = []
     for pattern in patterns:
