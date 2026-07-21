@@ -150,7 +150,7 @@ def truncate_error_text(
         return message
     return f"{message[:max_chars]}... [truncated]"
 
-
+# remove the noise from tracebacks and keep the most relevant error message
 def _strip_traceback_noise(message: str) -> str:
     lines = message.splitlines()
     if not any(line.strip().startswith("Traceback") for line in lines):

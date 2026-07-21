@@ -3,6 +3,7 @@ Streamlit session-state helpers.
 '''
 
 from __future__ import annotations
+from typing import cast
 
 from collections.abc import MutableMapping
 
@@ -47,9 +48,7 @@ SESSION_DEFAULTS: dict[str, object] = {
 }
 
 
-def initialize_session_state(
-    state: MutableMapping[str, object],
-) -> None:
+def initialize_session_state(state: MutableMapping[str, object]) -> None:
     for key, default in SESSION_DEFAULTS.items():
         state.setdefault(key, default)
 
@@ -60,16 +59,13 @@ def clear_output_state(state: MutableMapping[str, object]) -> None:
     state["output_file_name"] = None
 
 
-def begin_accepted_run(
-    state: MutableMapping[str, object],
-    now: float | None = None,
-) -> None:
+def begin_accepted_run(state: MutableMapping[str, object], now: float | None = None) -> None:
     state["error_message"] = None
     state["error_source"] = None
     clear_output_state(state)
     state["is_running"] = True
     if now is not None:
-        state["run_count"] = int(state.get("run_count", 0)) + 1
+        state["run_count"] = cast(int, state.get("run_count", 0)) + 1
         state["last_run_timestamp"] = now
 
 
@@ -87,20 +83,14 @@ def mark_run_success(
     state["is_running"] = False
 
 
-def mark_run_failure(
-    state: MutableMapping[str, object],
-    error_message: str,
-) -> None:
+def mark_run_failure(state: MutableMapping[str, object], error_message: str) -> None:
     clear_output_state(state)
     state["error_message"] = error_message
     state["error_source"] = ERROR_SOURCE_EXECUTION
     state["is_running"] = False
 
 
-def mark_validation_error(
-    state: MutableMapping[str, object],
-    error_message: str,
-) -> None:
+def mark_validation_error(state: MutableMapping[str, object], error_message: str) -> None:
     state["error_message"] = error_message
     state["error_source"] = ERROR_SOURCE_VALIDATION
     state["is_running"] = False
@@ -132,10 +122,7 @@ def check_rate_limit(
     return True, None
 
 
-def get_remaining_rewrites(
-    rewrite_count: int,
-    max_rewrites: int = MAX_REWRITES_PER_SESSION,
-) -> int:
+def get_remaining_rewrites(rewrite_count: int, max_rewrites: int = MAX_REWRITES_PER_SESSION) -> int:
     return max(0, max_rewrites - rewrite_count)
 
 
@@ -161,11 +148,8 @@ def check_rewrite_rate_limit(
     return True, None
 
 
-def begin_accepted_rewrite(
-    state: MutableMapping[str, object],
-    now: float,
-) -> None:
+def begin_accepted_rewrite(state: MutableMapping[str, object], now: float) -> None:
     state["rewrite_error_message"] = None
-    state["rewrite_count"] = int(state.get("rewrite_count", 0)) + 1
+    state["rewrite_count"] = cast(int, state.get("rewrite_count", 0)) + 1
     state["last_rewrite_timestamp"] = now
     state["is_rewriting_task"] = True
