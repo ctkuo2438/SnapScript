@@ -1,7 +1,7 @@
 # Agent Instructions
 
 ## Project
-- SnapScript is a Python CLI/web tool for natural-language CSV/Excel processing.
+- SnapScript is a Python CLI/web/MCP tool for natural-language CSV/Excel processing.
 - Phase 1 built the single-file CLI/core pipeline.
 - Phase 2 added a thin Streamlit UI on top of the same safe core pipeline.
 - Phase 3 added Docker sandbox hardening and an execution backend router.
@@ -20,12 +20,10 @@
 ## References
 | Need | File |
 |------|------|
-| Architecture | `snapscript-sds.md` |
-| Active TODOs and decisions | `TODOS.md` |
-| Phase 1 plan | `docs/phase1_implementation_plan.md` |
-| Phase 2 plan | `docs/phase2_implementation_plan.md` |
-| Phase 3 plan | `docs/phase3_implementation_plan.md` |
-| Phase 4 plan | `docs/phase4_implementation_plan.md` |
+| Architecture, Phase 1–4, active TODOs | `docs/development.md` |
+| Active feature spec | `spec.md` |
+| MCP feature spec and verification | `specs/mcp.md` |
+| Feature verification | `docs/ai_csv_merge_verification.md` |
 | Docker sandbox | `docs/docker_sandbox.md` |
 | Package/dependency config | `pyproject.toml` |
 
@@ -102,6 +100,15 @@
 - Use `uv run` commands for verification.
 - Run the smallest relevant tests first, then broader tests for gates.
 - Do not commit, push, or run destructive commands unless explicitly asked.
+
+## Spec-Driven Development
+- For feature work, read the relevant spec (`spec.md` for CSV Merge, `specs/mcp.md` for the approved local MCP tools) and `docs/development.md` before editing code.
+- Compare the spec with existing code; implement only the missing behavior.
+- Keep a short implementation checklist in the spec and record routine decisions there. Use existing user authorization; do not ask again for routine implementation choices.
+- Give each acceptance criterion an ID and map it to independent expected results and verification commands.
+- Add meaningful regression tests, implement, run the smallest relevant tests, and fix failures before the full gate.
+- Write actual command results and AC evidence to `docs/ai_csv_merge_verification.md` for CSV Merge, or `specs/mcp.md` for MCP. Mark skipped Docker/provider checks as unverified, never passed.
+- The agent develops SnapScript; do not add a runtime agent framework or HTTP API just to adopt this workflow.
 
 ## Code Review Rules
 

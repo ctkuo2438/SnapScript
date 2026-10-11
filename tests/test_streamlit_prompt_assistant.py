@@ -1,7 +1,4 @@
-from pathlib import Path
-
 import pandas as pd
-import pytest
 
 from snapscript.core.models import (
     ExecutionResult,
@@ -20,12 +17,8 @@ from helpers.streamlit_helpers import (
     _multi_schema,
     _rendered_text,
     _schema,
+    isolate_audit_log,
 )
-
-
-@pytest.fixture(autouse=True)
-def isolate_audit_log(monkeypatch, tmp_path: Path) -> None:
-    monkeypatch.setattr(web, "AUDIT_LOG_PATH", tmp_path / "audit.jsonl")
 
 
 def test_prompt_coach_renders_for_single_file_after_task_and_schema(
@@ -38,7 +31,7 @@ def test_prompt_coach_renders_for_single_file_after_task_and_schema(
     )
     seen: dict[str, object] = {}
     monkeypatch.setattr(web, "st", fake_st)
-    monkeypatch.setattr(web.schema_inspector, "inspect", lambda _path: _schema())
+    monkeypatch.setattr(web.schema_inspector, "inspect", lambda _path, config=None: _schema())
     monkeypatch.setattr(
         web.task_advisor,
         "advise_task",
@@ -77,7 +70,7 @@ def test_prompt_coach_renders_for_two_file_mode_after_task_and_schema(
     monkeypatch.setattr(
         web.schema_inspector,
         "inspect_many",
-        lambda specs: (
+        lambda specs, config=None: (
             seen.update({"specs": specs})
             or _multi_schema()
         ),
@@ -121,7 +114,7 @@ def test_prompt_coach_too_vague_advice_does_not_disable_generate(
         task_text="clean this",
     )
     monkeypatch.setattr(web, "st", fake_st)
-    monkeypatch.setattr(web.schema_inspector, "inspect", lambda _path: _schema())
+    monkeypatch.setattr(web.schema_inspector, "inspect", lambda _path, config=None: _schema())
     monkeypatch.setattr(
         web.task_advisor,
         "advise_task",
@@ -148,7 +141,7 @@ def test_prompt_coach_rendering_does_not_call_execution_pipeline(
         task_text="Filter rows where amount is greater than 1000",
     )
     monkeypatch.setattr(web, "st", fake_st)
-    monkeypatch.setattr(web.schema_inspector, "inspect", lambda _path: _schema())
+    monkeypatch.setattr(web.schema_inspector, "inspect", lambda _path, config=None: _schema())
     monkeypatch.setattr(
         web.task_advisor,
         "advise_task",
@@ -187,7 +180,7 @@ def test_prompt_coach_rendering_does_not_load_task_rewriter(monkeypatch) -> None
         task_text="Filter rows where amount is greater than 1000",
     )
     monkeypatch.setattr(web, "st", fake_st)
-    monkeypatch.setattr(web.schema_inspector, "inspect", lambda _path: _schema())
+    monkeypatch.setattr(web.schema_inspector, "inspect", lambda _path, config=None: _schema())
     monkeypatch.setattr(
         web.task_advisor,
         "advise_task",
@@ -228,7 +221,7 @@ def test_prompt_coach_does_not_render_guidance_or_suggested_task(
         }
     )
     monkeypatch.setattr(web, "st", fake_st)
-    monkeypatch.setattr(web.schema_inspector, "inspect", lambda _path: _schema())
+    monkeypatch.setattr(web.schema_inspector, "inspect", lambda _path, config=None: _schema())
     monkeypatch.setattr(
         web.task_advisor,
         "advise_task",
@@ -297,7 +290,7 @@ def test_ai_rewrite_not_called_without_explicit_click(monkeypatch) -> None:
         task_text="Filter rows where amount is greater than 1000",
     )
     monkeypatch.setattr(web, "st", fake_st)
-    monkeypatch.setattr(web.schema_inspector, "inspect", lambda _path: _schema())
+    monkeypatch.setattr(web.schema_inspector, "inspect", lambda _path, config=None: _schema())
     monkeypatch.setattr(
         web.task_advisor,
         "advise_task",
@@ -352,8 +345,8 @@ def test_ai_rewrite_click_calls_advisor_and_rewriter_for_single_file(
 
     monkeypatch.setattr(web, "st", fake_st)
     monkeypatch.setattr(web.time, "monotonic", lambda: 123.0)
-    monkeypatch.setattr(web, "build_prompt_coach_advice", lambda _state: None)
-    monkeypatch.setattr(web.schema_inspector, "inspect", lambda _path: _schema())
+    monkeypatch.setattr(web, "build_prompt_coach_advice", lambda _state, config=None: None)
+    monkeypatch.setattr(web.schema_inspector, "inspect", lambda _path, config=None: _schema())
     monkeypatch.setattr(
         web.task_advisor,
         "advise_task",
@@ -413,11 +406,11 @@ def test_ai_rewrite_click_passes_multi_file_schema(monkeypatch) -> None:
 
     monkeypatch.setattr(web, "st", fake_st)
     monkeypatch.setattr(web.time, "monotonic", lambda: 123.0)
-    monkeypatch.setattr(web, "build_prompt_coach_advice", lambda _state: None)
+    monkeypatch.setattr(web, "build_prompt_coach_advice", lambda _state, config=None: None)
     monkeypatch.setattr(
         web.schema_inspector,
         "inspect_many",
-        lambda _specs: _multi_schema(),
+        lambda _specs, config=None: _multi_schema(),
     )
     monkeypatch.setattr(
         web.task_advisor,
@@ -513,8 +506,8 @@ def test_ai_rewrite_does_not_call_generate_pipeline_helpers(monkeypatch) -> None
 
     monkeypatch.setattr(web, "st", fake_st)
     monkeypatch.setattr(web.time, "monotonic", lambda: 123.0)
-    monkeypatch.setattr(web, "build_prompt_coach_advice", lambda _state: None)
-    monkeypatch.setattr(web.schema_inspector, "inspect", lambda _path: _schema())
+    monkeypatch.setattr(web, "build_prompt_coach_advice", lambda _state, config=None: None)
+    monkeypatch.setattr(web.schema_inspector, "inspect", lambda _path, config=None: _schema())
     monkeypatch.setattr(
         web.task_advisor,
         "advise_task",
@@ -562,8 +555,8 @@ def test_ai_rewrite_error_is_concise_and_redacted(monkeypatch) -> None:
 
     monkeypatch.setattr(web, "st", fake_st)
     monkeypatch.setattr(web.time, "monotonic", lambda: 123.0)
-    monkeypatch.setattr(web, "build_prompt_coach_advice", lambda _state: None)
-    monkeypatch.setattr(web.schema_inspector, "inspect", lambda _path: _schema())
+    monkeypatch.setattr(web, "build_prompt_coach_advice", lambda _state, config=None: None)
+    monkeypatch.setattr(web.schema_inspector, "inspect", lambda _path, config=None: _schema())
     monkeypatch.setattr(
         web.task_advisor,
         "advise_task",
@@ -602,8 +595,8 @@ def test_provider_failure_after_accepted_rewrite_keeps_count(monkeypatch) -> Non
     )
     monkeypatch.setattr(web, "st", fake_st)
     monkeypatch.setattr(web.time, "monotonic", lambda: 200.0)
-    monkeypatch.setattr(web, "build_prompt_coach_advice", lambda _state: None)
-    monkeypatch.setattr(web.schema_inspector, "inspect", lambda _path: _schema())
+    monkeypatch.setattr(web, "build_prompt_coach_advice", lambda _state, config=None: None)
+    monkeypatch.setattr(web.schema_inspector, "inspect", lambda _path, config=None: _schema())
     monkeypatch.setattr(
         web.task_advisor,
         "advise_task",
@@ -694,7 +687,7 @@ def test_rewrite_limit_and_cooldown_do_not_block_generate(monkeypatch) -> None:
     monkeypatch.setattr(
         web,
         "run_uploaded_task",
-        lambda _file_bytes, _suffix, _task_text, uploaded_file_name=None, audit_metadata=None: (
+        lambda _file_bytes, _suffix, _task_text, uploaded_file_name=None, audit_metadata=None, config=None: (
             calls.append("generate")
             or (
                 web.ExecutionResult(success=True),
@@ -723,7 +716,7 @@ def test_generate_run_count_does_not_affect_rewrite_count(monkeypatch) -> None:
     monkeypatch.setattr(
         web,
         "run_uploaded_task",
-        lambda _file_bytes, _suffix, _task_text, uploaded_file_name=None, audit_metadata=None: (
+        lambda _file_bytes, _suffix, _task_text, uploaded_file_name=None, audit_metadata=None, config=None: (
             web.ExecutionResult(success=True),
             b"order_id,total\n1,10\n",
             web.derive_output_file_name(uploaded_file_name, ".csv"),
@@ -745,8 +738,8 @@ def test_generate_run_limit_does_not_block_ai_rewrite(monkeypatch) -> None:
     fake_st.session_state["run_count"] = web.MAX_RUNS_PER_SESSION
     monkeypatch.setattr(web, "st", fake_st)
     monkeypatch.setattr(web.time, "monotonic", lambda: 600.0)
-    monkeypatch.setattr(web, "build_prompt_coach_advice", lambda _state: None)
-    monkeypatch.setattr(web.schema_inspector, "inspect", lambda _path: _schema())
+    monkeypatch.setattr(web, "build_prompt_coach_advice", lambda _state, config=None: None)
+    monkeypatch.setattr(web.schema_inspector, "inspect", lambda _path, config=None: _schema())
     monkeypatch.setattr(
         web.task_advisor,
         "advise_task",

@@ -12,6 +12,7 @@ from pathlib import Path, PureWindowsPath
 import re
 import tempfile
 import time
+from typing import cast
 import uuid
 
 import pandas as pd
@@ -25,6 +26,7 @@ from snapscript.core import (
     schema_inspector,
     task_advisor,
 )
+from snapscript.core.audit_logger import redact_secret_values as redact_error_text
 from snapscript.core.models import (
     ExecutionResult,
     InputFileSpec,
@@ -58,7 +60,7 @@ from snapscript.interfaces.web_state import (
 )
 
 
-ALLOWED_UPLOAD_SUFFIXES = {".csv", ".xlsx", ".xls"}
+ALLOWED_UPLOAD_SUFFIXES = {".csv", ".xlsx"}
 MAX_UPLOAD_BYTES = 10 * 1024 * 1024
 PREVIEW_MAX_ROWS = 100
 ERROR_MAX_CHARS = 2000
@@ -79,7 +81,6 @@ AUDIT_LOG_PATH = audit_logger.DEFAULT_AUDIT_LOG_PATH
 DOWNLOAD_MIME_TYPES = {
     ".csv": "text/csv",
     ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-    ".xls": "application/vnd.ms-excel",
 }
 DOCKER_BACKEND_HINT = (
     "SNAPSCRIPT_SANDBOX_BACKEND=docker uv run streamlit run app.py"
@@ -93,9 +94,7 @@ def initialize_session_state(
     _initialize_session_state(target)
 
 
-def render_runtime_sidebar() -> None:
-    config = AppConfig()
-
+def render_runtime_sidebar(config: AppConfig) -> None:
     st.sidebar.subheader("Runtime")
     st.sidebar.write(f"Sandbox backend: {config.sandbox_backend}")
     st.sidebar.caption("Use Docker backend:")
@@ -106,40 +105,6 @@ def _task_rewriter_module():
     from snapscript.core import task_rewriter
 
     return task_rewriter
-
-
-def redact_error_text(message: str) -> str:
-    redacted = re.sub(
-        r"\b(?P<name>[A-Z0-9_]*(?:API[_-]?KEY|TOKEN|PASSWORD|SECRET))"
-        r"\s*=\s*['\"]?[^\s'\",;]+['\"]?",
-        lambda match: f"{match.group('name')}=[REDACTED]",
-        message,
-        flags=re.IGNORECASE,
-    )
-    redacted = re.sub(
-        r"\b(?P<name>api[_-]?key|token|password|secret)"
-        r"\s*=\s*['\"]?[^\s'\",;]+['\"]?",
-        lambda match: f"{match.group('name')}=[REDACTED]",
-        redacted,
-        flags=re.IGNORECASE,
-    )
-    redacted = re.sub(
-        r"\bBearer\s+sk-[A-Za-z0-9._-]+",
-        "Bearer [REDACTED]",
-        redacted,
-        flags=re.IGNORECASE,
-    )
-    redacted = re.sub(
-        r"\bsk-ant-[A-Za-z0-9._-]+",
-        "[REDACTED]",
-        redacted,
-    )
-    redacted = re.sub(
-        r"\bsk-[A-Za-z0-9][A-Za-z0-9._-]{8,}",
-        "[REDACTED]",
-        redacted,
-    )
-    return redacted
 
 
 def truncate_error_text(
@@ -437,6 +402,7 @@ def write_named_upload_to_temp_input(
 
 def build_prompt_coach_advice(
     state: MutableMapping[str, object],
+    config: AppConfig,
 ) -> TaskAdvice | None:
     task_text = str(state.get("task_text", ""))
     if not normalize_task_text(task_text):
@@ -444,9 +410,9 @@ def build_prompt_coach_advice(
 
     try:
         if str(state.get("input_mode", INPUT_MODE_SINGLE)) == INPUT_MODE_TWO:
-            schema = _inspect_two_file_prompt_coach_schema(state)
+            schema = _inspect_two_file_prompt_coach_schema(state, config)
         else:
-            schema = _inspect_single_file_prompt_coach_schema(state)
+            schema = _inspect_single_file_prompt_coach_schema(state, config)
     except (ValueError, OSError, schema_inspector.SchemaInspectionError):
         return None
 
@@ -504,18 +470,21 @@ def _validate_two_file_rewrite_context(
 
 def build_task_rewrite_context(
     state: MutableMapping[str, object],
+    config: AppConfig,
 ) -> tuple[SchemaReport | MultiFileSchemaReport, TaskAdvice]:
     task_text = validate_task_text(str(state.get("task_text", "")))
     if str(state.get("input_mode", INPUT_MODE_SINGLE)) == INPUT_MODE_TWO:
-        schema = _inspect_two_file_prompt_coach_schema(state)
+        schema = _inspect_two_file_prompt_coach_schema(state, config)
     else:
-        schema = _inspect_single_file_prompt_coach_schema(state)
+        schema = _inspect_single_file_prompt_coach_schema(state, config)
     return schema, task_advisor.advise_task(task_text, schema)
 
 
-def improve_task_with_ai(state: MutableMapping[str, object]) -> None:
+def improve_task_with_ai(
+    state: MutableMapping[str, object],
+    config: AppConfig,
+) -> None:
     task_text = str(state.get("task_text", ""))
-    config = AppConfig()
     provider = config.llm_provider
     model = config.default_model
     schema_summary: dict[str, object] | None = None
@@ -528,7 +497,7 @@ def improve_task_with_ai(state: MutableMapping[str, object]) -> None:
 
     try:
         task_text = validate_task_text(str(state.get("task_text", "")))
-        schema, advice = build_task_rewrite_context(state)
+        schema, advice = build_task_rewrite_context(state, config)
         schema_summary = _schema_summary_for_task_rewrite_audit(schema)
     except (ValueError, OSError, schema_inspector.SchemaInspectionError):
         state["rewritten_task"] = None
@@ -538,7 +507,12 @@ def improve_task_with_ai(state: MutableMapping[str, object]) -> None:
         rewriter = _task_rewriter_module()
         provider_called = True
         try:
-            rewritten = rewriter.rewrite_task(task_text, schema, advice=advice)
+            rewritten = rewriter.rewrite_task(
+                task_text,
+                schema,
+                advice=advice,
+                config=config,
+            )
         except rewriter.TaskRewriteError as exc:
             state["rewritten_task"] = None
             state["rewrite_error_message"] = _format_task_rewrite_error(exc)
@@ -588,6 +562,7 @@ def _classify_task_rewrite_error(exc: Exception) -> str:
 
 def _inspect_single_file_prompt_coach_schema(
     state: MutableMapping[str, object],
+    config: AppConfig,
 ) -> SchemaReport:
     if (
         state.get("uploaded_file_bytes") is None
@@ -602,11 +577,15 @@ def _inspect_single_file_prompt_coach_schema(
             bytes(state["uploaded_file_bytes"]),
             str(state["uploaded_file_suffix"]),
         )
-        return schema_inspector.inspect(input_path)
+        return schema_inspector.inspect(
+            input_path,
+            config=config,
+        )
 
 
 def _inspect_two_file_prompt_coach_schema(
     state: MutableMapping[str, object],
+    config: AppConfig,
 ) -> MultiFileSchemaReport:
     if (
         state.get("first_uploaded_file_bytes") is None
@@ -662,11 +641,20 @@ def _inspect_two_file_prompt_coach_schema(
                 ),
             ),
         ]
-        return schema_inspector.inspect_many(input_specs)
+        return schema_inspector.inspect_many(
+            input_specs,
+            config=config,
+        )
 
 
-def render_prompt_coach(state: MutableMapping[str, object]) -> None:
-    advice = build_prompt_coach_advice(state)
+def render_prompt_coach(
+    state: MutableMapping[str, object],
+    config: AppConfig,
+) -> None:
+    advice = build_prompt_coach_advice(
+        state,
+        config=config,
+    )
     if advice is None:
         return
 
@@ -682,7 +670,10 @@ def render_prompt_coach(state: MutableMapping[str, object]) -> None:
             st.write(f"- {suggestion}")
 
 
-def render_ai_rewrite_controls(state: MutableMapping[str, object]) -> None:
+def render_ai_rewrite_controls(
+    state: MutableMapping[str, object],
+    config: AppConfig,
+) -> None:
     st.subheader("AI Task Rewrite")
     remaining_rewrites = get_remaining_rewrites(
         int(state.get("rewrite_count", 0))
@@ -723,7 +714,7 @@ def render_ai_rewrite_controls(state: MutableMapping[str, object]) -> None:
                 )
             else:
                 begin_accepted_rewrite(state, now)
-                improve_task_with_ai(state)
+                improve_task_with_ai(state, config)
 
     rewrite_error = state.get("rewrite_error_message")
     if rewrite_error:
@@ -883,59 +874,38 @@ def _prompt_text_for_audit(prompt: PromptPayload) -> str:
 
 
 def _write_streamlit_audit_event(
-    *,
-    run_id: str,
-    duration_ms: int,
-    success: bool,
-    input_file_name: str | None,
-    input_file_bytes: bytes,
-    task_text: str,
+    state: MutableMapping[str, object],
     audit_metadata: MutableMapping[str, object],
-    output_file_name: str | None = None,
-    output_file_bytes: bytes | None = None,
-    error_category: str | None = None,
+    *,
+    duration_ms: int,
+    error_category: str | None,
+    config: AppConfig,
 ) -> None:
-    config = AppConfig()
+    single_file = state["input_mode"] == INPUT_MODE_SINGLE
+    input_file_name = (
+        str(state["uploaded_file_name"])
+        if single_file
+        else ", ".join(
+            str(state[f"{slot}_uploaded_file_name"]) for slot in ("first", "second")
+        )
+    )
     event = audit_logger.build_audit_event(
-        run_id=run_id,
         interface=AUDIT_INTERFACE,
         provider=config.llm_provider,
         model=config.default_model,
         provider_called=bool(audit_metadata.get("provider_called", False)),
-        success=success,
+        success=error_category is None,
         duration_ms=duration_ms,
         input_file_name=input_file_name,
-        input_file_bytes=input_file_bytes,
-        task_text=task_text,
+        input_file_bytes=bytes(state["uploaded_file_bytes"]) if single_file else None,
+        task_text=str(state["task_text"]),
         schema_summary=audit_metadata.get("schema_summary"),
-        prompt_text=(
-            str(audit_metadata["prompt_text"])
-            if audit_metadata.get("prompt_text") is not None
-            else None
-        ),
-        generated_code=(
-            str(audit_metadata["generated_code"])
-            if audit_metadata.get("generated_code") is not None
-            else None
-        ),
-        output_file_name=output_file_name,
-        output_file_bytes=output_file_bytes,
+        prompt_text=cast(str | None, audit_metadata.get("prompt_text")),
+        output_file_name=cast(str | None, state["output_file_name"]),
+        output_file_bytes=cast(bytes | None, state["output_bytes"]),
         error_category=error_category,
-        attempt_count=(
-            int(audit_metadata["attempt_count"])
-            if audit_metadata.get("attempt_count") is not None
-            else None
-        ),
-        system_prompt=(
-            str(audit_metadata["system_prompt"])
-            if audit_metadata.get("system_prompt") is not None
-            else None
-        ),
-        user_prompt=(
-            str(audit_metadata["user_prompt"])
-            if audit_metadata.get("user_prompt") is not None
-            else None
-        ),
+        system_prompt=cast(str | None, audit_metadata.get("system_prompt")),
+        user_prompt=cast(str | None, audit_metadata.get("user_prompt")),
     )
     audit_logger.write_audit_event_best_effort(event, log_path=AUDIT_LOG_PATH)
 
@@ -946,6 +916,7 @@ def run_uploaded_task(
     task_text: str,
     uploaded_file_name: str | None = None,
     audit_metadata: MutableMapping[str, object] | None = None,
+    config: AppConfig | None = None,
 ) -> tuple[ExecutionResult, bytes | None, str | None]:
     normalized_suffix = validate_upload_suffix(f"input{upload_suffix}")
     normalized_task = validate_task_text(task_text)
@@ -959,18 +930,30 @@ def run_uploaded_task(
         )
         output_path = temp_dir / f"output{normalized_suffix}"
 
-        schema = schema_inspector.inspect(input_path)
+        schema = schema_inspector.inspect(
+            input_path,
+            config=config,
+        )
         if audit_metadata is not None:
             audit_metadata["schema_summary"] = _schema_summary_for_audit(schema)
 
-        prompt = prompt_builder.build(normalized_task, schema)
+        prompt = prompt_builder.build(
+            normalized_task,
+            schema,
+            config=config,
+        )
         if audit_metadata is not None:
             audit_metadata["prompt_text"] = _prompt_text_for_audit(prompt)
             audit_metadata["system_prompt"] = prompt.system_prompt
             audit_metadata["user_prompt"] = prompt.user_prompt
             audit_metadata["provider_called"] = True
 
-        result = retry_handler.run(prompt, input_path, output_path)
+        result = retry_handler.run(
+            prompt,
+            input_path,
+            output_path,
+            config=config,
+        )
 
         if not result.success:
             return result, None, None
@@ -994,6 +977,7 @@ def run_uploaded_tasks_many(
     second_uploaded_file_name: str | None,
     task_text: str,
     audit_metadata: MutableMapping[str, object] | None = None,
+    config: AppConfig | None = None,
 ) -> tuple[ExecutionResult, bytes | None, str | None]:
     validate_upload_size(first_file_bytes)
     validate_upload_size(second_file_bytes)
@@ -1049,20 +1033,32 @@ def run_uploaded_tasks_many(
         ]
         output_path = temp_dir / "output.csv"
 
-        multi_schema = schema_inspector.inspect_many(input_specs)
+        multi_schema = schema_inspector.inspect_many(
+            input_specs,
+            config=config,
+        )
         if audit_metadata is not None:
             audit_metadata["schema_summary"] = _multi_schema_summary_for_audit(
                 multi_schema
             )
 
-        prompt = prompt_builder.build_many(normalized_task, multi_schema)
+        prompt = prompt_builder.build_many(
+            normalized_task,
+            multi_schema,
+            config=config,
+        )
         if audit_metadata is not None:
             audit_metadata["prompt_text"] = _prompt_text_for_audit(prompt)
             audit_metadata["system_prompt"] = prompt.system_prompt
             audit_metadata["user_prompt"] = prompt.user_prompt
             audit_metadata["provider_called"] = True
 
-        result = retry_handler.run_many(prompt, input_specs, output_path)
+        result = retry_handler.run_many(
+            prompt,
+            input_specs,
+            output_path,
+            config=config,
+        )
 
         if not result.success:
             return result, None, None
@@ -1092,320 +1088,175 @@ def format_exception_error(exc: Exception) -> str:
     )
 
 
-def main() -> None:
-    initialize_session_state()
+def _render_uploaded_file(slot: str | None = None) -> str | None:
+    state = st.session_state
+    uploaded = st.file_uploader(
+        f"{slot.title()} CSV or Excel file" if slot else "Upload CSV or Excel file",
+        type=["csv", "xlsx"],
+        key=f"{slot}_file" if slot else None,
+    )
+    if slot:
+        name_key = f"{slot}_logical_name"
+        state[name_key] = st.text_input(
+            f"{slot.title()} logical name", value=str(state[name_key])
+        )
+    if uploaded is None:
+        return None
 
-    st.title("SnapScript")
-    st.write("Transform a CSV or Excel file with a natural-language task.")
-    render_runtime_sidebar()
-    current_input_error: str | None = None
+    file_bytes = uploaded.getvalue()
+    try:
+        if slot:
+            store_named_uploaded_file(state, slot, uploaded.name, file_bytes)
+        else:
+            store_uploaded_file(state, uploaded.name, file_bytes)
+    except ValueError:
+        return str(state["error_message"])
+    st.success(f"Uploaded {uploaded.name} ({len(file_bytes)} bytes).")
+    return None
 
-    input_mode = st.radio(
+
+def _render_input_controls() -> str | None:
+    state = st.session_state
+    state["input_mode"] = st.radio(
         "Input mode",
         [INPUT_MODE_SINGLE, INPUT_MODE_TWO],
-        index=(
-            1
-            if st.session_state.get("input_mode") == INPUT_MODE_TWO
-            else 0
-        ),
+        index=1 if state["input_mode"] == INPUT_MODE_TWO else 0,
     )
-    st.session_state["input_mode"] = input_mode
-
-    if input_mode == INPUT_MODE_TWO:
-        first_uploaded_file = st.file_uploader(
-            "First CSV or Excel file",
-            type=["csv", "xlsx", "xls"],
-            key="first_file",
-        )
-        first_logical_name = st.text_input(
-            "First logical name",
-            value=str(st.session_state["first_logical_name"]),
-        )
-        st.session_state["first_logical_name"] = first_logical_name
-        if first_uploaded_file is not None:
-            first_file_bytes = first_uploaded_file.getvalue()
-            try:
-                store_named_uploaded_file(
-                    st.session_state,
-                    "first",
-                    first_uploaded_file.name,
-                    first_file_bytes,
-                )
-            except ValueError:
-                current_input_error = str(st.session_state["error_message"])
-                pass
-            else:
-                st.success(
-                    f"Uploaded {first_uploaded_file.name} "
-                    f"({len(first_file_bytes)} bytes)."
-                )
-
-        second_uploaded_file = st.file_uploader(
-            "Second CSV or Excel file",
-            type=["csv", "xlsx", "xls"],
-            key="second_file",
-        )
-        second_logical_name = st.text_input(
-            "Second logical name",
-            value=str(st.session_state["second_logical_name"]),
-        )
-        st.session_state["second_logical_name"] = second_logical_name
-        if second_uploaded_file is not None:
-            second_file_bytes = second_uploaded_file.getvalue()
-            try:
-                store_named_uploaded_file(
-                    st.session_state,
-                    "second",
-                    second_uploaded_file.name,
-                    second_file_bytes,
-                )
-            except ValueError:
-                current_input_error = str(st.session_state["error_message"])
-                pass
-            else:
-                st.success(
-                    f"Uploaded {second_uploaded_file.name} "
-                    f"({len(second_file_bytes)} bytes)."
-                )
-    else:
-        uploaded_file = st.file_uploader(
-            "Upload CSV or Excel file",
-            type=["csv", "xlsx", "xls"],
-        )
-        if uploaded_file is not None:
-            file_bytes = uploaded_file.getvalue()
-            try:
-                store_uploaded_file(
-                    st.session_state,
-                    uploaded_file.name,
-                    file_bytes,
-                )
-            except ValueError:
-                current_input_error = str(st.session_state["error_message"])
-                pass
-            else:
-                st.success(
-                    f"Uploaded {uploaded_file.name} ({len(file_bytes)} bytes)."
-                )
-
-    task_text = st.text_area(
-        "Describe the transformation",
-        value=str(st.session_state["task_text"]),
+    current_input_error: str | None = None
+    slots = ("first", "second") if state["input_mode"] == INPUT_MODE_TWO else (None,)
+    for slot in slots:
+        current_input_error = _render_uploaded_file(slot) or current_input_error
+    state["task_text"] = st.text_area(
+        "Describe the transformation", value=str(state["task_text"])
     )
-    st.session_state["task_text"] = task_text
+    return current_input_error
 
-    render_prompt_coach(st.session_state)
-    render_ai_rewrite_controls(st.session_state)
 
-    remaining_runs = get_remaining_runs(int(st.session_state["run_count"]))
+def _run_uploaded_inputs(
+    state: MutableMapping[str, object],
+    audit_metadata: MutableMapping[str, object],
+    config: AppConfig,
+) -> tuple[ExecutionResult, bytes | None, str | None]:
+    if state["input_mode"] == INPUT_MODE_TWO:
+        return run_uploaded_tasks_many(
+            first_file_bytes=bytes(state["first_uploaded_file_bytes"]),
+            first_suffix=str(state["first_uploaded_file_suffix"]),
+            first_logical_name=str(state["first_logical_name"]),
+            first_uploaded_file_name=str(state["first_uploaded_file_name"]),
+            second_file_bytes=bytes(state["second_uploaded_file_bytes"]),
+            second_suffix=str(state["second_uploaded_file_suffix"]),
+            second_logical_name=str(state["second_logical_name"]),
+            second_uploaded_file_name=str(state["second_uploaded_file_name"]),
+            task_text=str(state["task_text"]),
+            audit_metadata=audit_metadata,
+            config=config,
+        )
+    return run_uploaded_task(
+        bytes(state["uploaded_file_bytes"]),
+        str(state["uploaded_file_suffix"]),
+        str(state["task_text"]),
+        uploaded_file_name=str(state["uploaded_file_name"]),
+        audit_metadata=audit_metadata,
+        config=config,
+    )
+
+
+def _run_generate(config: AppConfig) -> None:
+    state = st.session_state
+    audit_start = time.monotonic()
+    audit_metadata: dict[str, object] = {"provider_called": False}
+    error_category: str | None = "unknown_failure"
+    try:
+        result, output_bytes, output_file_name = _run_uploaded_inputs(
+            state, audit_metadata, config
+        )
+        if not result.success:
+            error_category = classify_error_category(
+                result.stderr.strip() or result.stdout.strip(),
+                exit_code=result.exit_code,
+                default_to_sandbox=True,
+            )
+            mark_run_failure(state, format_execution_error(result))
+        elif output_bytes is None or output_file_name is None:
+            mark_run_failure(state, "Output file was not available.")
+        else:
+            preview = load_output_preview(output_bytes, Path(output_file_name).suffix)
+            mark_run_success(state, preview, output_bytes, output_file_name)
+            error_category = None
+    except Exception as exc:
+        error_category = classify_error_category(str(exc))
+        mark_run_failure(state, format_exception_error(exc))
+    finally:
+        _write_streamlit_audit_event(
+            state,
+            audit_metadata,
+            duration_ms=int((time.monotonic() - audit_start) * 1000),
+            error_category=error_category,
+            config=config,
+        )
+    if error_category is None:
+        st.success("Generation succeeded.")
+
+
+def _handle_generate_click(config: AppConfig) -> None:
+    state = st.session_state
+    can_run, validation_error = can_generate(state)
+    if not can_run:
+        mark_validation_error(state, validation_error or "Cannot generate.")
+        return
+
+    now = time.monotonic()
+    last_run_timestamp = state["last_run_timestamp"]
+    accepted, rate_limit_error = check_rate_limit(
+        int(state["run_count"]),
+        float(last_run_timestamp) if last_run_timestamp is not None else None,
+        now,
+    )
+    if not accepted:
+        mark_validation_error(state, rate_limit_error or "Cannot generate.")
+        return
+    begin_accepted_run(state, now=now)
+    _run_generate(config)
+
+
+def _render_generate_controls(
+    config: AppConfig, current_input_error: str | None
+) -> None:
+    state = st.session_state
+    remaining_runs = get_remaining_runs(int(state["run_count"]))
     st.caption(f"Remaining runs this session: {remaining_runs}")
-
-    can_run, disabled_reason = can_generate(st.session_state)
+    can_run, disabled_reason = can_generate(state)
     current_validation_error = current_input_error or disabled_reason
     if (
         not can_run
         and current_validation_error is not None
         and (
-            input_mode == INPUT_MODE_TWO
+            state["input_mode"] == INPUT_MODE_TWO
             or current_input_error is not None
-            or int(st.session_state["run_count"]) >= MAX_RUNS_PER_SESSION
+            or int(state["run_count"]) >= MAX_RUNS_PER_SESSION
         )
     ):
         if current_input_error is None:
-            mark_validation_error(st.session_state, current_validation_error)
-    elif can_run or input_mode != INPUT_MODE_TWO:
-        clear_input_error_state(st.session_state)
+            mark_validation_error(state, current_validation_error)
+    elif can_run or state["input_mode"] != INPUT_MODE_TWO:
+        clear_input_error_state(state)
 
     if st.button("Generate", disabled=not can_run):
-        can_run, validation_error = can_generate(st.session_state)
-        if not can_run:
-            mark_validation_error(
-                st.session_state,
-                validation_error or "Cannot generate.",
-            )
-        else:
-            now = time.monotonic()
-            last_run_timestamp = st.session_state["last_run_timestamp"]
-            accepted, rate_limit_error = check_rate_limit(
-                int(st.session_state["run_count"]),
-                (
-                    float(last_run_timestamp)
-                    if last_run_timestamp is not None
-                    else None
-                ),
-                now,
-            )
-            if not accepted:
-                mark_validation_error(
-                    st.session_state,
-                    rate_limit_error or "Cannot generate.",
-                )
-            else:
-                begin_accepted_run(st.session_state, now=now)
-                audit_run_id = uuid.uuid4().hex
-                audit_metadata: dict[str, object] = {"provider_called": False}
-                audit_start = time.monotonic()
-                if input_mode == INPUT_MODE_TWO:
-                    first_display_name = str(
-                        st.session_state["first_uploaded_file_name"]
-                    )
-                    second_display_name = str(
-                        st.session_state["second_uploaded_file_name"]
-                    )
-                    display_file_name = (
-                        f"{first_display_name}, {second_display_name}"
-                    )
-                    input_file_bytes = b""
-                    output_suffix = ".csv"
-                else:
-                    uploaded_file_name = st.session_state["uploaded_file_name"]
-                    display_file_name = (
-                        str(uploaded_file_name)
-                        if uploaded_file_name is not None
-                        else None
-                    )
-                    input_file_bytes = bytes(
-                        st.session_state["uploaded_file_bytes"]
-                    )
-                    output_suffix = str(st.session_state["uploaded_file_suffix"])
-                input_task_text = str(st.session_state["task_text"])
-                try:
-                    if input_mode == INPUT_MODE_TWO:
-                        result, output_bytes, output_file_name = (
-                            run_uploaded_tasks_many(
-                                first_file_bytes=bytes(
-                                    st.session_state[
-                                        "first_uploaded_file_bytes"
-                                    ]
-                                ),
-                                first_suffix=str(
-                                    st.session_state[
-                                        "first_uploaded_file_suffix"
-                                    ]
-                                ),
-                                first_logical_name=str(
-                                    st.session_state["first_logical_name"]
-                                ),
-                                first_uploaded_file_name=first_display_name,
-                                second_file_bytes=bytes(
-                                    st.session_state[
-                                        "second_uploaded_file_bytes"
-                                    ]
-                                ),
-                                second_suffix=str(
-                                    st.session_state[
-                                        "second_uploaded_file_suffix"
-                                    ]
-                                ),
-                                second_logical_name=str(
-                                    st.session_state["second_logical_name"]
-                                ),
-                                second_uploaded_file_name=second_display_name,
-                                task_text=input_task_text,
-                                audit_metadata=audit_metadata,
-                            )
-                        )
-                    else:
-                        result, output_bytes, output_file_name = run_uploaded_task(
-                            input_file_bytes,
-                            output_suffix,
-                            input_task_text,
-                            uploaded_file_name=display_file_name,
-                            audit_metadata=audit_metadata,
-                        )
-                    if result.success and output_bytes is not None:
-                        result_preview = load_output_preview(
-                            output_bytes,
-                            output_suffix,
-                        )
-                except Exception as exc:
-                    duration_ms = int((time.monotonic() - audit_start) * 1000)
-                    _write_streamlit_audit_event(
-                        run_id=audit_run_id,
-                        duration_ms=duration_ms,
-                        success=False,
-                        input_file_name=display_file_name,
-                        input_file_bytes=input_file_bytes,
-                        task_text=input_task_text,
-                        audit_metadata=audit_metadata,
-                        error_category=classify_error_category(str(exc)),
-                    )
-                    mark_run_failure(
-                        st.session_state,
-                        format_exception_error(exc),
-                    )
-                else:
-                    duration_ms = int((time.monotonic() - audit_start) * 1000)
-                    if result.success:
-                        if output_bytes is None or output_file_name is None:
-                            _write_streamlit_audit_event(
-                                run_id=audit_run_id,
-                                duration_ms=duration_ms,
-                                success=False,
-                                input_file_name=display_file_name,
-                                input_file_bytes=input_file_bytes,
-                                task_text=input_task_text,
-                                audit_metadata=audit_metadata,
-                                error_category="unknown_failure",
-                            )
-                            mark_run_failure(
-                                st.session_state,
-                                "Output file was not available.",
-                            )
-                            st.error(str(st.session_state["error_message"]))
-                        else:
-                            _write_streamlit_audit_event(
-                                run_id=audit_run_id,
-                                duration_ms=duration_ms,
-                                success=True,
-                                input_file_name=display_file_name,
-                                input_file_bytes=input_file_bytes,
-                                task_text=input_task_text,
-                                audit_metadata=audit_metadata,
-                                output_file_name=output_file_name,
-                                output_file_bytes=output_bytes,
-                            )
-                            mark_run_success(
-                                st.session_state,
-                                result_preview,
-                                output_bytes,
-                                output_file_name,
-                            )
-                            st.success("Generation succeeded.")
-                    else:
-                        error_text = (
-                            result.stderr.strip() or result.stdout.strip()
-                        )
-                        _write_streamlit_audit_event(
-                            run_id=audit_run_id,
-                            duration_ms=duration_ms,
-                            success=False,
-                            input_file_name=display_file_name,
-                            input_file_bytes=input_file_bytes,
-                            task_text=input_task_text,
-                            audit_metadata=audit_metadata,
-                            error_category=classify_error_category(
-                                error_text,
-                                exit_code=result.exit_code,
-                                default_to_sandbox=True,
-                            ),
-                        )
-                        mark_run_failure(
-                            st.session_state,
-                            format_execution_error(result),
-                        )
-                        st.error(str(st.session_state["error_message"]))
+        _handle_generate_click(config)
 
+
+def _render_output() -> None:
+    state = st.session_state
     st.subheader("Output")
-    result_preview = st.session_state["result_preview"]
+    result_preview = state["result_preview"]
     if result_preview is not None:
         st.caption(f"Showing up to {PREVIEW_MAX_ROWS} preview rows.")
         st.dataframe(result_preview)
     else:
         st.info("Output preview will appear here after a successful run.")
 
-    output_bytes = st.session_state["output_bytes"]
-    output_file_name = st.session_state["output_file_name"]
+    output_bytes = state["output_bytes"]
+    output_file_name = state["output_file_name"]
     if output_bytes is not None and output_file_name is not None:
         st.download_button(
             label="Download output",
@@ -1415,11 +1266,25 @@ def main() -> None:
         )
 
     st.subheader("Errors")
-    error_message = st.session_state["error_message"]
-    if error_message:
-        st.error(str(error_message))
+    if state["error_message"]:
+        st.error(str(state["error_message"]))
     else:
         st.info("No errors.")
+
+
+def main() -> None:
+    initialize_session_state()
+    config = AppConfig()
+    st.title("SnapScript")
+    st.write("Transform a CSV or Excel file with a natural-language task.")
+    render_runtime_sidebar(config)
+
+    current_input_error = _render_input_controls()
+    render_prompt_coach(st.session_state, config)
+    render_ai_rewrite_controls(st.session_state, config)
+    _render_generate_controls(config, current_input_error)
+    _render_output()
+
 
 # The entry point for running the Streamlit app
 if __name__ == "__main__":

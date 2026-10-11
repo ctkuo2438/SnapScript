@@ -73,28 +73,28 @@ def _patch_pipeline(
     monkeypatch.setattr(
         cli.schema_inspector,
         "inspect",
-        lambda path, sheet=None: calls.append(f"inspect:{sheet}") or _schema(),
+        lambda path, sheet=None, config=None: calls.append(f"inspect:{sheet}") or _schema(),
     )
     monkeypatch.setattr(
         cli.prompt_builder,
         "build",
-        lambda task, schema: calls.append(f"build:{task}") or _payload(),
+        lambda task, schema, config=None: calls.append(f"build:{task}") or _payload(),
     )
     monkeypatch.setattr(
         cli.code_generator,
         "generate",
-        lambda prompt, model=None: calls.append("generate") or _script(),
+        lambda prompt, model=None, config=None: calls.append("generate") or _script(),
     )
     monkeypatch.setattr(
         cli.safety_checker,
         "check",
-        lambda code: calls.append("safety")
+        lambda code, config=None: calls.append("safety")
         or (safety if safety is not None else SafetyResult(is_safe=True)),
     )
     monkeypatch.setattr(
         cli.retry_handler,
         "run",
-        lambda prompt, input_path, output_path, model=None: calls.append("retry")
+        lambda prompt, input_path, output_path, model=None, config=None: calls.append("retry")
         or (
             execution
             if execution is not None
@@ -128,7 +128,7 @@ def test_validates_input_before_generation(
     monkeypatch.setattr(
         cli.code_generator,
         "generate",
-        lambda prompt, model=None: calls.append("generate") or _script(),
+        lambda prompt, model=None, config=None: calls.append("generate") or _script(),
     )
 
     status = cli.main(
@@ -158,7 +158,7 @@ def test_rejects_unsupported_extension_before_generation(
     monkeypatch.setattr(
         cli.code_generator,
         "generate",
-        lambda prompt, model=None: calls.append("generate") or _script(),
+        lambda prompt, model=None, config=None: calls.append("generate") or _script(),
     )
 
     status = cli.main(
@@ -175,6 +175,36 @@ def test_rejects_unsupported_extension_before_generation(
     assert status == 1
     assert calls == []
     assert "Unsupported input file type" in capsys.readouterr().err
+
+
+def test_rejects_xls_before_generation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    input_path = tmp_path / "legacy.xls"
+    input_path.write_bytes(b"legacy workbook")
+    calls: list[str] = []
+    monkeypatch.setattr(
+        cli.code_generator,
+        "generate",
+        lambda prompt, model=None, config=None: calls.append("generate") or _script(),
+    )
+
+    status = cli.main(
+        [
+            "filter rows",
+            "--file",
+            str(input_path),
+            "--output",
+            str(tmp_path / "out.csv"),
+            "--yes",
+        ]
+    )
+
+    assert status == 1
+    assert calls == []
+    assert "Unsupported input file type: .xls" in capsys.readouterr().err
 
 
 def test_dry_run_generates_and_checks_but_does_not_execute(
@@ -258,17 +288,17 @@ def test_dry_run_invalid_generated_python_fails_before_success(
     monkeypatch.setattr(
         cli.schema_inspector,
         "inspect",
-        lambda path, sheet=None: _schema(),
+        lambda path, sheet=None, config=None: _schema(),
     )
     monkeypatch.setattr(
         cli.prompt_builder,
         "build",
-        lambda task, schema: _payload(),
+        lambda task, schema, config=None: _payload(),
     )
     monkeypatch.setattr(
         cli.code_generator,
         "generate",
-        lambda prompt, model=None: GeneratedScript(
+        lambda prompt, model=None, config=None: GeneratedScript(
             code="x =",
             raw_response="x =",
             model="mock-model",
@@ -302,12 +332,12 @@ def test_dry_run_model_override_passes_model_to_code_generator(
     input_path = tmp_path / "orders.csv"
     input_path.write_text("order_id,amount\n1,10\n")
     seen_models: list[str | None] = []
-    monkeypatch.setattr(cli.schema_inspector, "inspect", lambda path, sheet=None: _schema())
-    monkeypatch.setattr(cli.prompt_builder, "build", lambda task, schema: _payload())
+    monkeypatch.setattr(cli.schema_inspector, "inspect", lambda path, sheet=None, config=None: _schema())
+    monkeypatch.setattr(cli.prompt_builder, "build", lambda task, schema, config=None: _payload())
     monkeypatch.setattr(
         cli.code_generator,
         "generate",
-        lambda prompt, model=None: seen_models.append(model) or _script(),
+        lambda prompt, model=None, config=None: seen_models.append(model) or _script(),
     )
 
     status = cli.main(
@@ -334,12 +364,12 @@ def test_dry_run_without_model_override_preserves_default_generation(
     input_path = tmp_path / "orders.csv"
     input_path.write_text("order_id,amount\n1,10\n")
     seen_models: list[str | None] = []
-    monkeypatch.setattr(cli.schema_inspector, "inspect", lambda path, sheet=None: _schema())
-    monkeypatch.setattr(cli.prompt_builder, "build", lambda task, schema: _payload())
+    monkeypatch.setattr(cli.schema_inspector, "inspect", lambda path, sheet=None, config=None: _schema())
+    monkeypatch.setattr(cli.prompt_builder, "build", lambda task, schema, config=None: _payload())
     monkeypatch.setattr(
         cli.code_generator,
         "generate",
-        lambda prompt, model=None: seen_models.append(model) or _script(),
+        lambda prompt, model=None, config=None: seen_models.append(model) or _script(),
     )
 
     status = cli.main(
@@ -393,12 +423,12 @@ def test_model_override_passes_model_to_retry_pipeline(
     output_path = tmp_path / "out.csv"
     input_path.write_text("order_id,amount\n1,10\n")
     seen_models: list[str | None] = []
-    monkeypatch.setattr(cli.schema_inspector, "inspect", lambda path, sheet=None: _schema())
-    monkeypatch.setattr(cli.prompt_builder, "build", lambda task, schema: _payload())
+    monkeypatch.setattr(cli.schema_inspector, "inspect", lambda path, sheet=None, config=None: _schema())
+    monkeypatch.setattr(cli.prompt_builder, "build", lambda task, schema, config=None: _payload())
     monkeypatch.setattr(
         cli.retry_handler,
         "run",
-        lambda prompt, input_path, output_path, model=None: seen_models.append(model)
+        lambda prompt, input_path, output_path, model=None, config=None: seen_models.append(model)
         or ExecutionResult(success=True, exit_code=0),
     )
 
@@ -435,36 +465,36 @@ def test_two_named_files_call_multi_file_core_pipeline(
     monkeypatch.setattr(
         cli.schema_inspector,
         "inspect_many",
-        lambda specs: calls.append("inspect_many")
+        lambda specs, config=None: calls.append("inspect_many")
         or seen_specs.append(specs)
         or _multi_schema(),
     )
     monkeypatch.setattr(
         cli.prompt_builder,
         "build_many",
-        lambda task, multi_schema: calls.append(f"build_many:{task}") or _payload(),
+        lambda task, multi_schema, config=None: calls.append(f"build_many:{task}") or _payload(),
     )
     monkeypatch.setattr(
         cli.retry_handler,
         "run_many",
-        lambda prompt, specs, output, model=None: calls.append("run_many")
+        lambda prompt, specs, output, model=None, config=None: calls.append("run_many")
         or seen_specs.append(specs)
         or ExecutionResult(success=True, stdout="joined output", exit_code=0),
     )
     monkeypatch.setattr(
         cli.schema_inspector,
         "inspect",
-        lambda path, sheet=None: pytest.fail("single-file inspect should not run"),
+        lambda path, sheet=None, config=None: pytest.fail("single-file inspect should not run"),
     )
     monkeypatch.setattr(
         cli.prompt_builder,
         "build",
-        lambda task, schema: pytest.fail("single-file prompt builder should not run"),
+        lambda task, schema, config=None: pytest.fail("single-file prompt builder should not run"),
     )
     monkeypatch.setattr(
         cli.retry_handler,
         "run",
-        lambda prompt, input_path, output_path, model=None: pytest.fail("single-file retry should not run"),
+        lambda prompt, input_path, output_path, model=None, config=None: pytest.fail("single-file retry should not run"),
     )
 
     status = cli.main(
@@ -507,17 +537,17 @@ def test_rejects_sheet_in_multi_file_mode_before_core_pipeline(
     monkeypatch.setattr(
         cli.schema_inspector,
         "inspect_many",
-        lambda specs: calls.append("inspect_many") or _multi_schema(),
+        lambda specs, config=None: calls.append("inspect_many") or _multi_schema(),
     )
     monkeypatch.setattr(
         cli.prompt_builder,
         "build_many",
-        lambda task, multi_schema: calls.append("build_many") or _payload(),
+        lambda task, multi_schema, config=None: calls.append("build_many") or _payload(),
     )
     monkeypatch.setattr(
         cli.retry_handler,
         "run_many",
-        lambda prompt, specs, output, model=None: calls.append("run_many")
+        lambda prompt, specs, output, model=None, config=None: calls.append("run_many")
         or ExecutionResult(success=True, exit_code=0),
     )
 
@@ -576,12 +606,12 @@ def test_show_code_prints_generated_code(
         "combined_df = pd.concat([orders_df, filtered_orders_df], "
         "ignore_index=True)"
     )
-    monkeypatch.setattr(cli.schema_inspector, "inspect", lambda path, sheet=None: _schema())
-    monkeypatch.setattr(cli.prompt_builder, "build", lambda task, schema: _payload())
+    monkeypatch.setattr(cli.schema_inspector, "inspect", lambda path, sheet=None, config=None: _schema())
+    monkeypatch.setattr(cli.prompt_builder, "build", lambda task, schema, config=None: _payload())
     monkeypatch.setattr(
         cli.code_generator,
         "generate",
-        lambda prompt, model=None: GeneratedScript(
+        lambda prompt, model=None, config=None: GeneratedScript(
             code=generated_code,
             raw_response=generated_code,
             model="test-model",
@@ -650,6 +680,7 @@ def test_api_key_is_redacted_from_errors(
         input_path: Path,
         output_path: Path,
         model: str | None = None,
+        config: object | None = None,
     ) -> ExecutionResult:
         raise RuntimeError("provider rejected secret-api-key")
 
@@ -734,7 +765,7 @@ def test_rejects_invalid_multi_file_arguments(
     monkeypatch.setattr(
         cli.schema_inspector,
         "inspect_many",
-        lambda specs: calls.append("inspect_many") or _multi_schema(),
+        lambda specs, config=None: calls.append("inspect_many") or _multi_schema(),
     )
     argv = ["merge files"]
     for file_arg in file_args:

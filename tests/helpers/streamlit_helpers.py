@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from pathlib import Path
+
+import pytest
 
 from snapscript.core.models import (
     MultiFileSchemaReport,
@@ -9,6 +12,13 @@ from snapscript.core.models import (
     SchemaReport,
     TaskAdvice,
 )
+
+
+@pytest.fixture(autouse=True)
+def isolate_audit_log(monkeypatch, tmp_path: Path) -> None:
+    from snapscript.interfaces import web
+
+    monkeypatch.setattr(web, "AUDIT_LOG_PATH", tmp_path / "audit.jsonl")
 
 
 class FakeUploadedFile:
@@ -152,6 +162,7 @@ def _fake_rewriter_module(
             original_task: str,
             schema: SchemaReport | MultiFileSchemaReport,
             advice: TaskAdvice | None = None,
+            config: object | None = None,
         ) -> RewrittenTask:
             if on_call is not None:
                 on_call(original_task, schema, advice)
@@ -202,16 +213,6 @@ def _button_disabled_by_label(
     ]
     assert len(button_calls) == 1
     return bool(button_calls[0].get("disabled", False))
-
-
-def _has_placeholder_message(
-    calls: list[tuple[str, tuple[object, ...], dict[str, object]]],
-) -> bool:
-    return (
-        "info",
-        ("Generation is not wired yet. This is the Phase 2 skeleton.",),
-        {},
-    ) in calls
 
 
 def _rendered_text(

@@ -88,11 +88,9 @@ def build_audit_event(
     task_text: str | None = None,
     schema_summary: object | None = None,
     prompt_text: str | None = None,
-    generated_code: str | None = None,
     output_file_name: str | None = None,
     output_file_bytes: bytes | None = None,
     error_category: str | None = None,
-    attempt_count: int | None = None,
     include_debug: bool | None = None,
     system_prompt: str | None = None,
     user_prompt: str | None = None,
@@ -121,9 +119,6 @@ def build_audit_event(
             _sha256_json(schema_summary) if schema_summary is not None else None
         ),
         "prompt_sha256": sha256_text(prompt_text) if prompt_text else None,
-        "generated_code_sha256": (
-            sha256_text(generated_code) if generated_code else None
-        ),
         "output_file_name": output_file_name,
         "output_file_size_bytes": (
             len(output_file_bytes) if output_file_bytes is not None else None
@@ -134,14 +129,12 @@ def build_audit_event(
             else None
         ),
         "error_category": error_category,
-        "attempt_count": attempt_count,
     }
 
     if include_raw_debug:
         event["task_text"] = task_text
         event["system_prompt"] = system_prompt
         event["user_prompt"] = user_prompt
-        event["generated_code"] = generated_code
 
     return safe_json_value(event)  # type: ignore[return-value]
 

@@ -203,6 +203,13 @@ def test_inspect_many_rejects_empty_input_list() -> None:
         schema_inspector.inspect_many([])
 
 
+def test_validate_input_specs_rejects_more_than_two_files() -> None:
+    inputs = [InputFileSpec(name=name, path=Path(f"{name}.csv")) for name in ("a", "b", "c")]
+
+    with pytest.raises(schema_inspector.SchemaInspectionError, match="two"):
+        schema_inspector.validate_input_specs(inputs)
+
+
 def test_inspect_many_raises_for_unsupported_extension(tmp_path: Path) -> None:
     text_file = tmp_path / "input.txt"
     text_file.write_text("name\nAda\n")
@@ -259,6 +266,39 @@ def test_inspect_raises_for_unsupported_extension(tmp_path: Path) -> None:
 
     with pytest.raises(UnsupportedFileTypeError):
         schema_inspector.inspect(text_file)
+
+
+def test_inspect_raises_for_xls_file(tmp_path: Path) -> None:
+    workbook = tmp_path / "legacy.xls"
+    workbook.write_bytes(b"not a supported workbook")
+
+    with pytest.raises(UnsupportedFileTypeError):
+        schema_inspector.inspect(workbook)
+
+
+def test_truncate_columns_deduplicates_colliding_names(tmp_path: Path) -> None:
+    config = AppConfig(max_column_name_chars=5)
+    first_column = "customer_status_source"
+    second_column = "customer_status_target"
+    df = pd.DataFrame(
+        {
+            first_column: [1, 2],
+            second_column: [3, 4],
+        }
+    )
+
+    truncated = schema_inspector._truncate_columns(df, config)
+
+    assert list(truncated.columns) == ["custo", "custo_2"]
+    assert truncated.columns.is_unique
+
+    csv_path = tmp_path / "colliding_columns.csv"
+    df.to_csv(csv_path, index=False)
+
+    report = schema_inspector.inspect(csv_path, config=config)
+
+    assert [column.name for column in report.columns] == ["custo", "custo_2"]
+    assert list(report.sample_rows[0]) == ["custo", "custo_2"]
 
 
 def test_inspect_raises_for_unreadable_supported_file(tmp_path: Path) -> None:

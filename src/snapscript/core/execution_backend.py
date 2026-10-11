@@ -23,11 +23,31 @@ def execute(
 
     if backend == "subprocess":
         if isinstance(input_path, list):
-            return sandbox_executor.execute_many(code, input_path, output_path)
-        return sandbox_executor.execute(code, input_path, output_path)
+            return sandbox_executor.execute_many(
+                code,
+                input_path,
+                output_path,
+                config=selected_config,
+            )
+        return sandbox_executor.execute(
+            code,
+            input_path,
+            output_path,
+            config=selected_config,
+        )
     if backend == "docker":
         if isinstance(input_path, list):
-            return docker_sandbox_executor.execute_many(code, input_path, output_path)
-        return docker_sandbox_executor.execute(code, input_path, output_path)
+            return docker_sandbox_executor.execute_many(
+                code,
+                input_path,
+                output_path,
+                config=selected_config,
+            )
+        return docker_sandbox_executor.execute(
+            code,
+            input_path,
+            output_path,
+            config=selected_config,
+        )
 
     raise ValueError(f"Unsupported sandbox backend: {backend}")

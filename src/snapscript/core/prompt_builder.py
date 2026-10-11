@@ -32,14 +32,13 @@ PROMPT_DIR = Path(__file__).resolve().parents[1] / "prompts"
 SYSTEM_PROMPT_PATH = PROMPT_DIR / "system.txt"
 
 
-def build(task_description: str, schema: SchemaReport) -> PromptPayload:
-    config = AppConfig()
+def build(task_description: str, schema: SchemaReport, config: AppConfig | None = None) -> PromptPayload:
+    config = config if config is not None else AppConfig()
     system_prompt = _load_system_prompt()
     schema_data = _schema_to_prompt_data(schema) # convert SchemaReport to dict format
     user_prompt = _build_user_prompt(task_description, schema_data) # user prompt + schema information
 
-    # if exceed about 8000 tokens,
-    #   then truncate the sample rows and column sample values in the schema to fit the prompt within token limits
+    # if exceed about 8000 tokens, then truncate the sample rows and column sample values in the schema to fit the prompt within token limits
     if _estimate_tokens(system_prompt + user_prompt) > config.max_prompt_tokens:
         # remove the sample rows and column sample values from the schema to reduce tokens
         schema_data = _truncate_schema_samples(schema_data)
@@ -50,10 +49,11 @@ def build(task_description: str, schema: SchemaReport) -> PromptPayload:
         user_prompt=user_prompt,
     )
 
+
 # similar to build(), but for multiple files, the user prompt will include multiple file schemas 
 #   and instructions to use INPUT_PATHS with logical names instead of hardcoding file paths
-def build_many(task_description: str, multi_schema: MultiFileSchemaReport) -> PromptPayload:
-    config = AppConfig()
+def build_many(task_description: str, multi_schema: MultiFileSchemaReport, config: AppConfig | None = None) -> PromptPayload:
+    config = config if config is not None else AppConfig()
     system_prompt = _load_system_prompt()
     schema_data = _multi_schema_to_prompt_data(multi_schema)
     user_prompt = _build_multi_file_user_prompt(task_description, schema_data)
@@ -118,6 +118,21 @@ def _build_multi_file_user_prompt(task_description: str, schema_data: list[dict[
         'When the task asks for a left join or to keep all rows from the first file, use how="left". '
         'When the task asks for a right join or to keep all rows from the second file, use how="right". '
         'When the task asks for an outer join or to keep all rows from both files, use how="outer". '
+        "For merge tasks without a join type, default to an inner join. "
+        "Use the task's explicit keys; never silently replace a missing key. "
+        "A single key named by the task must exist under that exact name in both inputs. "
+        "Only use differently named keys when the task explicitly names a key for each input. "
+        "For example, if the task says merge on pid and one file has sku but no pid, "
+        "raise a missing-column error; do not infer pid=sku from matching values or rename sku. "
+        "Without explicit keys, require exactly one common column name; otherwise "
+        "raise an error asking the user to specify the key and list candidates. "
+        "Validate keys against the full DataFrames before merging. Missing keys or "
+        "required columns must name the logical input, missing column, and available columns. "
+        "Reject null key values and mismatched key dtypes with logical names and keys. "
+        "Do not silently coerce key types. Preserve duplicate keys and all pandas "
+        "merge pairings; do not deduplicate unless requested. Keep default _x/_y suffixes "
+        "unless the task explicitly requests other names. "
+        'Raise ValueError("Input validation: ...") for these input errors. '
         "Interpret the user's task and generate the pandas code; do not rely "
         "on SnapScript to parse join keywords."
     )
@@ -149,18 +164,14 @@ def _schema_to_prompt_data(schema: SchemaReport) -> dict[str, Any]:
     }
 
 
-def _multi_schema_to_prompt_data(
-    multi_schema: MultiFileSchemaReport,
-) -> list[dict[str, Any]]:
+def _multi_schema_to_prompt_data(multi_schema: MultiFileSchemaReport) -> list[dict[str, Any]]:
     return [
         _named_schema_to_prompt_data(file_schema)
         for file_schema in multi_schema.files
     ]
 
 
-def _named_schema_to_prompt_data(
-    file_schema: NamedSchemaReport,
-) -> dict[str, Any]:
+def _named_schema_to_prompt_data(file_schema: NamedSchemaReport) -> dict[str, Any]:
     schema_data = _schema_to_prompt_data(file_schema.schema)
     schema_data["logical_name"] = file_schema.name
     return schema_data
@@ -191,9 +202,7 @@ def _truncate_schema_samples(schema_data: dict[str, Any]) -> dict[str, Any]:
     return truncated
 
 
-def _truncate_multi_schema_samples(
-    schema_data: list[dict[str, Any]],
-) -> list[dict[str, Any]]:
+def _truncate_multi_schema_samples(schema_data: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return [_truncate_schema_samples(file_schema) for file_schema in schema_data]
 
 

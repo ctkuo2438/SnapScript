@@ -91,10 +91,8 @@ def test_build_audit_event_includes_safe_metadata_and_hashes() -> None:
         task_text="Keep large orders.",
         schema_summary={"columns": [{"name": "amount", "dtype": "int64"}]},
         prompt_text="system prompt\nuser prompt",
-        generated_code="print('ok')",
         output_file_name="orders_output.csv",
         output_file_bytes=b"order_id,amount\n1,1500\n",
-        attempt_count=2,
     )
 
     assert event["timestamp"] == "2026-05-19T00:00:00+00:00"
@@ -117,15 +115,13 @@ def test_build_audit_event_includes_safe_metadata_and_hashes() -> None:
     assert event["prompt_sha256"] == audit_logger.sha256_text(
         "system prompt\nuser prompt"
     )
-    assert event["generated_code_sha256"] == audit_logger.sha256_text(
-        "print('ok')"
-    )
+    assert "generated_code_sha256" not in event
     assert event["output_file_name"] == "orders_output.csv"
     assert event["output_file_size_bytes"] == 23
     assert event["output_file_sha256"] == audit_logger.sha256_bytes(
         b"order_id,amount\n1,1500\n"
     )
-    assert event["attempt_count"] == 2
+    assert "attempt_count" not in event
 
 
 def test_build_audit_event_omits_raw_file_prompt_task_and_code_by_default() -> None:
@@ -141,7 +137,6 @@ def test_build_audit_event_omits_raw_file_prompt_task_and_code_by_default() -> N
         input_file_bytes=b"customer,email\nAlice,alice@example.com\n",
         task_text="Keep Alice's rows.",
         prompt_text="Prompt with Alice",
-        generated_code="print('Alice')",
         output_file_bytes=b"customer,email\nAlice,alice@example.com\n",
     )
     serialized = json.dumps(event, sort_keys=True)
@@ -169,14 +164,13 @@ def test_build_audit_event_debug_mode_can_include_redacted_debug_fields() -> Non
         task_text="Filter rows with token=abc123",
         system_prompt="System Bearer sk-ant-api03-secret",
         user_prompt="User password=my-password",
-        generated_code="API_KEY=sk-ant-api03-secret",
         include_debug=True,
     )
 
     assert event["task_text"] == "Filter rows with token=[REDACTED]"
     assert event["system_prompt"] == "System Bearer [REDACTED]"
     assert event["user_prompt"] == "User password=[REDACTED]"
-    assert event["generated_code"] == "API_KEY=[REDACTED]"
+    assert "generated_code" not in event
 
 
 def test_build_audit_event_debug_env_var_enables_debug_fields(

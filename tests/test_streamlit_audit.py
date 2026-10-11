@@ -14,12 +14,55 @@ from helpers.streamlit_helpers import (
     FakeUploadedFile,
     _fake_rewriter_module,
     _schema,
+    isolate_audit_log,
 )
 
 
-@pytest.fixture(autouse=True)
-def isolate_audit_log(monkeypatch, tmp_path: Path) -> None:
-    monkeypatch.setattr(web, "AUDIT_LOG_PATH", tmp_path / "audit.jsonl")
+@pytest.mark.parametrize("success", [True, False])
+def test_upload_pipeline_output_and_audit_metadata(monkeypatch, success) -> None:
+    upload_bytes = b"order_id,amount,note\n1,1500,private-cell\n"
+    output_bytes = b"order_id,amount\n1,1500\n"
+    metadata: dict[str, object] = {}
+    workspaces: list[Path] = []
+
+    def fake_run(prompt, input_path, output_path, config=None):
+        assert input_path.name == "input.csv"
+        assert input_path.read_bytes() == upload_bytes
+        assert output_path.name == "output.csv"
+        assert output_path.parent == input_path.parent
+        assert str(input_path.parent) not in prompt.user_prompt
+        assert "Keep large orders." in prompt.user_prompt
+        assert metadata["provider_called"] is True
+        assert metadata["system_prompt"] == prompt.system_prompt
+        assert metadata["user_prompt"] == prompt.user_prompt
+        assert metadata["prompt_text"] == (
+            f"{prompt.system_prompt}\n\n{prompt.user_prompt}"
+        )
+        workspaces.append(input_path.parent)
+        output_path.write_bytes(output_bytes)
+        return ExecutionResult(success=success)
+
+    monkeypatch.setattr(web.retry_handler, "run", fake_run)
+
+    result, returned_output, filename = web.run_uploaded_task(
+        upload_bytes,
+        ".csv",
+        " Keep large orders. ",
+        uploaded_file_name="orders.csv",
+        audit_metadata=metadata,
+    )
+
+    assert result.success is success
+    assert returned_output == (output_bytes if success else None)
+    assert filename == ("orders_snapscript_output.csv" if success else None)
+    summary = metadata["schema_summary"]
+    assert isinstance(summary, dict)
+    assert summary["row_count"] == 1
+    assert len(summary["columns"]) == 3
+    assert "sample_rows" not in summary
+    assert "private-cell" not in json.dumps(summary)
+    assert len(workspaces) == 1
+    assert not workspaces[0].exists()
 
 
 def test_accepted_successful_rewrite_writes_metadata_only_audit_event(
@@ -37,8 +80,8 @@ def test_accepted_successful_rewrite_writes_metadata_only_audit_event(
     events: list[dict[str, object]] = []
     monkeypatch.setattr(web, "st", fake_st)
     monkeypatch.setattr(web.time, "monotonic", lambda: 300.0)
-    monkeypatch.setattr(web, "build_prompt_coach_advice", lambda _state: None)
-    monkeypatch.setattr(web.schema_inspector, "inspect", lambda _path: _schema())
+    monkeypatch.setattr(web, "build_prompt_coach_advice", lambda _state, config=None: None)
+    monkeypatch.setattr(web.schema_inspector, "inspect", lambda _path, config=None: _schema())
     monkeypatch.setattr(
         web.task_advisor,
         "advise_task",
@@ -72,6 +115,7 @@ def test_accepted_successful_rewrite_writes_metadata_only_audit_event(
     assert event["model"] == "test-model"
     assert event["success"] is True
     assert event["provider_called"] is True
+    assert event["error_category"] is None
     assert event["original_task_sha256"] == web.audit_logger.sha256_text(
         "clean this with token=abc123"
     )
@@ -98,8 +142,8 @@ def test_accepted_failed_rewrite_writes_metadata_only_audit_event(
     events: list[dict[str, object]] = []
     monkeypatch.setattr(web, "st", fake_st)
     monkeypatch.setattr(web.time, "monotonic", lambda: 400.0)
-    monkeypatch.setattr(web, "build_prompt_coach_advice", lambda _state: None)
-    monkeypatch.setattr(web.schema_inspector, "inspect", lambda _path: _schema())
+    monkeypatch.setattr(web, "build_prompt_coach_advice", lambda _state, config=None: None)
+    monkeypatch.setattr(web.schema_inspector, "inspect", lambda _path, config=None: _schema())
     monkeypatch.setattr(
         web.task_advisor,
         "advise_task",
@@ -169,8 +213,8 @@ def test_rewrite_audit_failure_does_not_break_rewrite_ux(monkeypatch) -> None:
     )
     monkeypatch.setattr(web, "st", fake_st)
     monkeypatch.setattr(web.time, "monotonic", lambda: 500.0)
-    monkeypatch.setattr(web, "build_prompt_coach_advice", lambda _state: None)
-    monkeypatch.setattr(web.schema_inspector, "inspect", lambda _path: _schema())
+    monkeypatch.setattr(web, "build_prompt_coach_advice", lambda _state, config=None: None)
+    monkeypatch.setattr(web.schema_inspector, "inspect", lambda _path, config=None: _schema())
     monkeypatch.setattr(
         web.task_advisor,
         "advise_task",
@@ -218,6 +262,7 @@ def test_main_accepted_successful_generate_writes_one_audit_event(
         _task_text: str,
         uploaded_file_name: str | None = None,
         audit_metadata: dict[str, object] | None = None,
+        config: object | None = None,
     ) -> tuple[web.ExecutionResult, bytes, str]:
         if audit_metadata is not None:
             audit_metadata.update(
@@ -225,7 +270,6 @@ def test_main_accepted_successful_generate_writes_one_audit_event(
                     "provider_called": True,
                     "schema_summary": {"columns": ["total"]},
                     "prompt_text": "system\n\nuser",
-                    "generated_code": "print('ok')",
                 }
             )
         return (
@@ -242,7 +286,7 @@ def test_main_accepted_successful_generate_writes_one_audit_event(
     event = events[0]
     assert event["interface"] == "streamlit"
     assert event["provider"] == "anthropic"
-    assert event["model"] == "claude-sonnet-4-20250514"
+    assert event["model"] == web.AppConfig().default_model
     assert event["provider_called"] is True
     assert event["success"] is True
     assert event["duration_ms"] == 0
@@ -259,9 +303,9 @@ def test_main_accepted_successful_generate_writes_one_audit_event(
     assert event["prompt_sha256"] == web.audit_logger.sha256_text(
         "system\n\nuser"
     )
-    assert event["generated_code_sha256"] == web.audit_logger.sha256_text(
-        "print('ok')"
-    )
+    assert "generated_code_sha256" not in event
+    assert "generated_code" not in event
+    assert "attempt_count" not in event
     assert event["output_file_name"] == "orders_snapscript_output.csv"
     assert event["output_file_sha256"] == web.audit_logger.sha256_bytes(
         b"order_id,total\n1,10\n"
@@ -269,82 +313,97 @@ def test_main_accepted_successful_generate_writes_one_audit_event(
     assert "Keep rows." not in json.dumps(event)
     assert "order_id,total" not in json.dumps(event)
 
-def test_main_accepted_failed_generate_writes_one_audit_event(
-    monkeypatch,
+
+@pytest.mark.parametrize("input_mode", ["Single file", "Two files"])
+@pytest.mark.parametrize(
+    ("outcome", "error_category"),
+    [
+        ("success", None),
+        ("execution_failure", "sandbox_failure"),
+        ("provider_exception", "provider_failure"),
+        ("missing_output", "unknown_failure"),
+        ("invalid_preview", "unknown_failure"),
+    ],
+)
+def test_generate_records_one_event_and_exposes_only_successful_outputs(
+    monkeypatch: pytest.MonkeyPatch,
+    input_mode: str,
+    outcome: str,
+    error_category: str | None,
 ) -> None:
     uploaded = FakeUploadedFile("orders.csv", b"order_id,total\n1,10\n")
     fake_st = FakeStreamlit(
         button_clicked=True,
         uploaded_file=uploaded,
+        input_mode=input_mode,
+        first_uploaded_file=uploaded,
+        second_uploaded_file=FakeUploadedFile("products.csv", b"order_id,name\n1,A\n"),
+        first_logical_name="orders",
+        second_logical_name="products",
         task_text="Keep rows.",
+    )
+    fake_st.session_state.update(
+        output_bytes=b"old output", output_file_name="old.csv", result_preview="old"
     )
     events: list[dict[str, object]] = []
     monkeypatch.setattr(web, "st", fake_st)
-    monkeypatch.setattr(
-        web.audit_logger,
-        "write_audit_event_best_effort",
-        lambda event, log_path=web.AUDIT_LOG_PATH: events.append(event) or True,
-    )
-    monkeypatch.setattr(
-        web,
-        "run_uploaded_task",
-        lambda _file_bytes, _suffix, _task_text, uploaded_file_name=None, audit_metadata=None: (
-            web.ExecutionResult(
-                success=False,
-                stderr="RuntimeError: transform failed",
-                exit_code=1,
-            ),
-            None,
-            None,
-        ),
-    )
-
-    web.main()
-
-    assert len(events) == 1
-    assert events[0]["success"] is False
-    assert events[0]["error_category"] == "sandbox_failure"
-    assert events[0]["output_file_sha256"] is None
-
-def test_main_provider_exception_writes_provider_failure_audit_event(
-    monkeypatch,
-) -> None:
-    uploaded = FakeUploadedFile("orders.csv", b"order_id,total\n1,10\n")
-    fake_st = FakeStreamlit(
-        button_clicked=True,
-        uploaded_file=uploaded,
-        task_text="Keep rows.",
-    )
-    events: list[dict[str, object]] = []
-    monkeypatch.setattr(web, "st", fake_st)
+    monkeypatch.setattr(web, "build_prompt_coach_advice", lambda _state, config=None: None)
     monkeypatch.setattr(
         web.audit_logger,
         "write_audit_event_best_effort",
         lambda event, log_path=web.AUDIT_LOG_PATH: events.append(event) or True,
     )
 
-    def raise_provider_error(
-        _file_bytes: bytes,
-        _suffix: str,
-        _task_text: str,
-        uploaded_file_name: str | None = None,
+    def run_upload(
+        *_args: object,
         audit_metadata: dict[str, object] | None = None,
-    ) -> tuple[web.ExecutionResult, None, None]:
-        if audit_metadata is not None:
-            audit_metadata["provider_called"] = True
-        raise RuntimeError(
-            "ProviderCallError: Bearer sk-ant-api03-exampleSecret123"
-        )
+        **_kwargs: object,
+    ) -> tuple[ExecutionResult, bytes | None, str | None]:
+        assert audit_metadata is not None
+        audit_metadata["provider_called"] = True
+        if outcome == "provider_exception":
+            raise RuntimeError("ProviderCallError: token: fixture-demo-value")
+        if outcome == "execution_failure":
+            return (
+                ExecutionResult(success=False, stderr="transform failed", exit_code=1),
+                None,
+                None,
+            )
+        if outcome == "missing_output":
+            return ExecutionResult(success=True), None, None
+        output = b"" if outcome == "invalid_preview" else uploaded.getvalue()
+        return ExecutionResult(success=True), output, "output.csv"
 
-    monkeypatch.setattr(web, "run_uploaded_task", raise_provider_error)
+    monkeypatch.setattr(web, "run_uploaded_task", run_upload)
+    monkeypatch.setattr(web, "run_uploaded_tasks_many", run_upload)
 
     web.main()
 
     assert len(events) == 1
-    assert events[0]["success"] is False
+    assert events[0]["success"] is (error_category is None)
+    assert events[0]["error_category"] == error_category
     assert events[0]["provider_called"] is True
-    assert events[0]["error_category"] == "provider_failure"
-    assert "sk-ant" not in json.dumps(events[0])
+    assert "fixture-demo-value" not in json.dumps(events[0])
+    assert fake_st.session_state["run_count"] == 1
+    assert fake_st.session_state["is_running"] is False
+    downloads = [
+        args for name, args, _kwargs in fake_st.calls if name == "download_button"
+    ]
+    if error_category is None:
+        assert len(downloads) == 1
+        assert fake_st.session_state["output_bytes"] == uploaded.getvalue()
+    else:
+        assert downloads == []
+        assert fake_st.session_state["result_preview"] is None
+        assert fake_st.session_state["output_bytes"] is None
+        assert "fixture-demo-value" not in str(fake_st.session_state["error_message"])
+        assert events[0]["output_file_sha256"] is None
+    if input_mode == "Two files":
+        assert events[0]["input_file_name"] == "orders.csv, products.csv"
+        assert events[0]["input_file_sha256"] is None
+        assert events[0]["input_file_size_bytes"] is None
+
+
 
 def test_main_validation_blocked_generate_writes_no_audit_event(
     monkeypatch,
@@ -431,7 +490,7 @@ def test_audit_logging_failure_does_not_break_successful_generate(
     monkeypatch.setattr(
         web,
         "run_uploaded_task",
-        lambda _file_bytes, _suffix, _task_text, uploaded_file_name=None, audit_metadata=None: (
+        lambda _file_bytes, _suffix, _task_text, uploaded_file_name=None, audit_metadata=None, config=None: (
             web.ExecutionResult(success=True),
             b"order_id,total\n1,10\n",
             web.derive_output_file_name(uploaded_file_name, ".csv"),

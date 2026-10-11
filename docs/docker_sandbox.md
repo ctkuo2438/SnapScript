@@ -52,9 +52,8 @@ The image includes only the runtime packages expected by generated data transfor
 - `pandas`
 - `openpyxl`
 - `chardet`
-- `xlrd`
 
-`xlrd` is included for legacy `.xls` read support because SnapScript accepts `.xls` inputs and validates `.xls` outputs through pandas.
+SnapScript supports CSV and `.xlsx` files; legacy `.xls` is rejected before sandbox execution.
 
 The image intentionally does not include:
 
@@ -71,11 +70,12 @@ Generated scripts should not call LLM providers from inside the sandbox.
 
 The Docker executor adds runtime restrictions when it starts the sandbox container:
 
-- `--network none` is used by default when `docker_network_disabled` is true.
+- `--network none` is mandatory; requests to enable container networking are rejected.
 - `--memory` uses `AppConfig.docker_memory_limit`.
 - `--cpus` uses `AppConfig.docker_cpu_limit`.
 - `--pids-limit 128` limits process fan-out inside the container.
-- Host-side timeout is enforced through `subprocess.run(..., timeout=AppConfig.docker_timeout_seconds)`.
+- Host-side timeout is capped at 30 seconds per attempt; shorter configured timeouts are allowed.
+- Each container has a unique name. On timeout, force-removal runs before workspace deletion with a separate 5-second cleanup timeout. Cleanup failure is reported explicitly.
 - Only the per-run temporary workspace is mounted into the container.
 - The repository root and user home directory must never be mounted.
 
@@ -86,7 +86,7 @@ The mounted workspace is created for one run, populated only with the copied inp
 
 These permissions are narrowly scoped to the per-run `TemporaryDirectory` workspace. They do not apply to the repository root, the user home directory, or arbitrary paths outside the temporary workspace.
 
-`--read-only` is deferred for now. Generated pandas and Excel workflows can need writable temporary locations, especially through pandas/openpyxl internals. A future hardening pass can revisit `--read-only` with explicit `--tmpfs` mounts after real CSV/XLSX/XLS smoke tests confirm compatibility.
+`--read-only` is deferred for now. Generated pandas and Excel workflows can need writable temporary locations, especially through pandas/openpyxl internals. A future hardening pass can revisit `--read-only` with explicit `--tmpfs` mounts after real CSV/XLSX smoke tests confirm compatibility.
 
 ## Security Notes
 
@@ -99,6 +99,11 @@ These permissions are narrowly scoped to the per-run `TemporaryDirectory` worksp
 - The container runs as a non-root `snapscript` user.
 
 ## Verification
+
+AI CSV Merge's active contract is [../spec.md](../spec.md). Its isolated execution
+gate explicitly selects Docker; subprocess compatibility tests do not prove
+Docker isolation. Sources are copied, source/output aliases are rejected, and
+symlink/non-file outputs are rejected before copy-out.
 
 Build the image:
 
@@ -117,6 +122,15 @@ Run the focused config and Docker executor tests:
 ```bash
 uv run pytest tests/test_config.py tests/test_docker_sandbox_executor.py
 ```
+
+Run the real Docker acceptance gate (mocked provider, actual container):
+
+```bash
+SNAPSCRIPT_DOCKER_TESTS=1 uv run pytest tests/integration/test_csv_merge_docker.py
+```
+
+This checks complete inner/left results, source preservation, the actual network
+and mount/resource configuration, and timeout cleanup. Normal pytest skips it.
 
 ## Troubleshooting
 
@@ -139,7 +153,7 @@ If you build with a different tag, update the local Docker image setting before 
 If generated scripts fail on Excel files, confirm the file format:
 
 - `.xlsx` support is provided by `openpyxl`.
-- `.xls` read support is provided by `xlrd`.
+- Legacy `.xls` files are not supported.
 
 Add packages only when they are needed by generated scripts and after checking that they do not pull in unnecessary provider or UI dependencies.
 

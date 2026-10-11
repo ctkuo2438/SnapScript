@@ -33,9 +33,9 @@ import tempfile
 import time
 from pathlib import Path
 
-import pandas as pd
-
 from snapscript.config import AppConfig
+from snapscript.core import schema_inspector
+from snapscript.core._sandbox_files import validate_destination, validate_output as _validate_output
 from snapscript.core.models import ExecutionResult, InputFileSpec
 
 
@@ -47,17 +47,37 @@ PATHS_MODULE_NAME = "_snapscript_paths.py"
 SAFE_FILENAME_PATTERN = re.compile(r"[^A-Za-z0-9._-]+")
 
 
-def execute(code: str, input_path: Path, output_path: Path) -> ExecutionResult:
+def execute(
+    code: str,
+    input_path: Path,
+    output_path: Path,
+    config: AppConfig | None = None,
+) -> ExecutionResult:
+    config = config if config is not None else AppConfig()
     input_spec = InputFileSpec(name="input", path=Path(input_path))
-    return _execute_with_inputs(code, [input_spec], Path(output_path), single_file=True)
+    return _execute_with_inputs(
+        code,
+        [input_spec],
+        Path(output_path),
+        single_file=True,
+        config=config,
+    )
 
 
 def execute_many(
     code: str,
     inputs: list[InputFileSpec],
     output_path: Path,
+    config: AppConfig | None = None,
 ) -> ExecutionResult:
-    return _execute_with_inputs(code, inputs, Path(output_path), single_file=False)
+    config = config if config is not None else AppConfig()
+    return _execute_with_inputs(
+        code,
+        inputs,
+        Path(output_path),
+        single_file=False,
+        config=config,
+    )
 
 
 def _execute_with_inputs(
@@ -65,9 +85,16 @@ def _execute_with_inputs(
     inputs: list[InputFileSpec],
     output_path: Path,
     single_file: bool,
+    config: AppConfig,
 ) -> ExecutionResult:
-    config = AppConfig()
     start_time = time.monotonic() # record the start time for execution time calculation
+    try:
+        inputs = schema_inspector.validate_input_specs(inputs)
+    except schema_inspector.SchemaInspectionError as exc:
+        return _failure_result(str(exc), 1, "", _duration(start_time))
+    destination_error = validate_destination(inputs, output_path)
+    if destination_error:
+        return _failure_result(destination_error, 1, "", _duration(start_time))
 
     # create a temporary workspace for the execution, all files will be created and executed in this workspace
     with tempfile.TemporaryDirectory(prefix="snapscript_") as workspace_name:
@@ -218,26 +245,6 @@ def _run_script(workspace: Path, config: AppConfig, start_time: float) -> Execut
         execution_time_seconds=_duration(start_time),
         exit_code=completed.returncode,
     )
-
-
-# None = valid output, string = validation error message
-def _validate_output(output_path: Path) -> str | None:
-    if not output_path.exists():
-        return "Output file was not created"
-    if output_path.stat().st_size == 0:
-        return "Output is empty"
-
-    try:
-        if output_path.suffix.lower() in {".xlsx", ".xls"}:
-            preview = pd.read_excel(output_path, nrows=1)
-        else:
-            preview = pd.read_csv(output_path, nrows=1)
-    except Exception as exc:
-        return f"Output unreadable: {exc}"
-
-    if preview.empty:
-        return "Output is empty"
-    return None
 
 
 # helper function to create a failure ExecutionResult

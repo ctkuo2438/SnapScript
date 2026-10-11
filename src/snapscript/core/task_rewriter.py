@@ -39,51 +39,9 @@ REAL_PATH_PATTERN = re.compile(
     r"(?:/(?:private/)?(?:tmp|var|Users|home)/[^\s,;]+|[A-Za-z]:\\[^\s,;]+)"
 )
 FILE_NAME_PATTERN = re.compile(
-    r"\b[^\s/\\]+\.(?:csv|xlsx|xls)\b",
+    r"\b[^\s/\\]+\.(?:csv|xlsx)\b",
     flags=re.IGNORECASE,
 )
-
-NON_COLUMN_REFERENCE_WORDS = frozenset(
-    {
-        "the",
-        "a",
-        "an",
-        "inner",
-        "left",
-        "right",
-        "outer",
-        "full",
-        "all",
-        "both",
-        "matching",
-        "matched",
-        "rows",
-        "row",
-        "columns",
-        "column",
-        "files",
-        "file",
-        "using",
-        "with",
-        "between",
-        "from",
-        "to",
-        "and",
-        "or",
-        "retain",
-        "keep",
-        "keeping",
-        "only",
-        "values",
-        "value",
-        "join",
-        "joined",
-        "output",
-        "result",
-        "results",
-    }
-)
-
 
 class TaskRewriteError(Exception):
     """Raised when task rewriting fails safely."""
@@ -94,7 +52,9 @@ def rewrite_task(
     schema: SchemaReport | MultiFileSchemaReport,
     advice: TaskAdvice | None = None,
     model: str | None = None,
+    config: AppConfig | None = None,
 ) -> RewrittenTask:
+    config = config if config is not None else AppConfig()
     system_prompt = _load_rewrite_prompt()
     user_prompt = _build_rewrite_user_prompt(original_task, schema, advice)
 
@@ -103,6 +63,7 @@ def rewrite_task(
             system_prompt,
             user_prompt,
             model,
+            config=config,
         )
     except TaskRewriteError:
         raise
@@ -110,7 +71,7 @@ def rewrite_task(
         raise TaskRewriteError("Task rewrite provider call failed") from None
 
     rewritten = _strip_rewrite_output(raw_text)
-    _validate_rewritten_task(rewritten, schema)
+    _validate_rewritten_task(rewritten)
     return RewrittenTask(
         original_task=original_task,
         rewritten_task=rewritten,
@@ -235,82 +196,25 @@ def _strip_rewrite_output(text: str) -> str:
     return stripped.strip("\"'")
 
 
-def _validate_rewritten_task(
-    text: str,
-    schema: SchemaReport | MultiFileSchemaReport,
-) -> None:
+def _validate_rewritten_task(text: str) -> None:
     if not text.strip():
         raise TaskRewriteError("Rewritten task is empty")
     if _looks_like_code(text):
         raise TaskRewriteError("Rewritten task must be natural language")
     if REAL_PATH_PATTERN.search(text) or FILE_NAME_PATTERN.search(text):
         raise TaskRewriteError("Rewritten task must not include real file paths")
-    unknown_column = _unknown_referenced_column(text, schema)
-    if unknown_column is not None:
-        raise TaskRewriteError(f"Rewritten task references unknown column: {unknown_column}")
 
 
 def _looks_like_code(text: str) -> bool:
     return any(re.search(pattern, text, flags=re.IGNORECASE) for pattern in CODE_PATTERNS)
 
 
-def _unknown_referenced_column(
-    text: str,
-    schema: SchemaReport | MultiFileSchemaReport,
-) -> str | None:
-    valid_columns = {column.lower() for column in _schema_columns(schema)}
-    file_names = {name.lower() for name in _schema_file_names(schema)}
-    for candidate in _candidate_column_references(text):
-        normalized = candidate.lower()
-        if normalized in NON_COLUMN_REFERENCE_WORDS:
-            continue
-        if normalized not in valid_columns and normalized not in file_names:
-            return candidate
-    return None
-
-
-def _schema_columns(schema: SchemaReport | MultiFileSchemaReport) -> list[str]:
-    if isinstance(schema, MultiFileSchemaReport):
-        return [
-            column.name
-            for file_schema in schema.files
-            for column in file_schema.schema.columns
-        ]
-    return [column.name for column in schema.columns]
-
-
-def _schema_file_names(schema: SchemaReport | MultiFileSchemaReport) -> list[str]:
-    if isinstance(schema, MultiFileSchemaReport):
-        return [file_schema.name for file_schema in schema.files]
-    return []
-
-
-def _candidate_column_references(text: str) -> list[str]:
-    optional_article = r"(?:the|a|an)\s+"
-    non_column_after_column = r"(?:with|from|to|and|or|for|in|of)\b"
-    patterns = (
-        rf"\bwhere\s+(?:{optional_article})?([A-Za-z_][A-Za-z0-9_]*)\b",
-        rf"\busing\s+(?:{optional_article})?([A-Za-z_][A-Za-z0-9_]*)\b",
-        rf"\bon\s+(?:{optional_article})?([A-Za-z_][A-Za-z0-9_]*)\b",
-        rf"\bby\s+(?:{optional_article})?([A-Za-z_][A-Za-z0-9_]*)\b",
-        rf"\bcolumn\s+(?!{non_column_after_column})"
-        rf"(?:named\s+|called\s+)?(?:{optional_article})?"
-        rf"([A-Za-z_][A-Za-z0-9_]*)\b",
-    )
-    candidates: list[str] = []
-    for pattern in patterns:
-        candidates.extend(
-            match.group(1) for match in re.finditer(pattern, text, re.IGNORECASE)
-        )
-    return candidates
-
-
 def _call_provider(
     system_prompt: str,
     user_prompt: str,
     model: str | None,
+    config: AppConfig,
 ) -> tuple[str, str, str]:
-    config = AppConfig()
     provider = config.llm_provider.lower()
     selected_model = model or config.default_model
     if provider != "anthropic":
@@ -320,13 +224,15 @@ def _call_provider(
 
     try:
         client = Anthropic()
-        response = client.messages.create(
-            model=selected_model,
-            max_tokens=config.max_tokens,
-            temperature=config.temperature,
-            system=system_prompt,
-            messages=[{"role": "user", "content": user_prompt}],
-        )
+        request_kwargs: dict[str, Any] = {
+            "model": selected_model,
+            "max_tokens": config.max_tokens,
+            "system": system_prompt,
+            "messages": [{"role": "user", "content": user_prompt}],
+        }
+        if config.temperature is not None:
+            request_kwargs["temperature"] = config.temperature
+        response = client.messages.create(**request_kwargs)
     except Exception:
         raise TaskRewriteError("Task rewrite provider call failed") from None
 

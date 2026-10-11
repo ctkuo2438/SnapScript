@@ -79,7 +79,6 @@ def test_can_generate_accepts_valid_upload_and_task_text() -> None:
     [
         ("orders.csv", ".csv"),
         ("orders.xlsx", ".xlsx"),
-        ("orders.xls", ".xls"),
         ("ORDERS.CSV", ".csv"),
     ],
 )
@@ -92,6 +91,10 @@ def test_validate_upload_suffix_accepts_supported_suffixes(
 def test_validate_upload_suffix_rejects_unsupported_suffix() -> None:
     with pytest.raises(ValueError, match="Unsupported file type"):
         web.validate_upload_suffix("orders.txt")
+
+def test_validate_upload_suffix_rejects_xls() -> None:
+    with pytest.raises(ValueError, match="Unsupported file type: .xls"):
+        web.validate_upload_suffix("report.xls")
 
 def test_validate_upload_size_rejects_large_upload() -> None:
     with pytest.raises(ValueError, match="10 MB"):

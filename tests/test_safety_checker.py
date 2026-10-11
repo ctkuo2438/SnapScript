@@ -90,6 +90,8 @@ def test_check_blocks_unsafe_call_fixtures(name: str, code: str) -> None:
     assert result.is_safe is False, name
     assert result.ast_valid is True
     assert result.violations
+    if name == "attribute_eval":
+        assert "Blocked unsafe name: __builtins__" in result.violations
 
 
 @pytest.mark.parametrize("name, code", UNSAFE_OPEN_SNIPPETS.items())
@@ -133,6 +135,77 @@ def test_check_allows_open_with_dynamic_output_path() -> None:
         "from _snapscript_paths import OUTPUT_PATH\n"
         "with open(OUTPUT_PATH, 'w') as file:\n"
         "    file.write('ok')\n"
+    )
+
+    result = safety_checker.check(code)
+
+    assert result.is_safe is True
+    assert result.violations == []
+
+
+def test_check_allows_re_compile_attribute_call() -> None:
+    code = (
+        "import re\n"
+        "pattern = re.compile(r'[0-9]+')\n"
+    )
+
+    result = safety_checker.check(code)
+
+    assert result.is_safe is True
+    assert result.violations == []
+
+
+def test_check_allows_pandas_eval_method_call() -> None:
+    code = (
+        "import pandas as pd\n"
+        "df = pd.DataFrame({'price': [10], 'qty': [2]})\n"
+        "df = df.eval('total = price * qty')\n"
+    )
+
+    result = safety_checker.check(code)
+
+    assert result.is_safe is True
+    assert result.violations == []
+
+
+def test_check_blocks_bare_eval_call() -> None:
+    result = safety_checker.check("eval('1 + 1')\n")
+
+    assert result.is_safe is False
+    assert "Blocked unsafe call: eval" in result.violations
+
+
+def test_check_blocks_bare_compile_call() -> None:
+    result = safety_checker.check("compile('x', '<s>', 'eval')\n")
+
+    assert result.is_safe is False
+    assert "Blocked unsafe call: compile" in result.violations
+
+
+def test_check_blocks_open_with_traversal_path() -> None:
+    result = safety_checker.check("open('../secret.txt')\n")
+
+    assert result.is_safe is False
+    assert "Blocked open() with unsafe literal path: ../secret.txt" in result.violations
+
+
+def test_check_blocks_builtins_aliasing() -> None:
+    code = (
+        "b = __builtins__\n"
+        "b.eval('1 + 1')\n"
+    )
+
+    result = safety_checker.check(code)
+
+    assert result.is_safe is False
+    assert "Blocked unsafe name: __builtins__" in result.violations
+
+
+def test_check_allows_name_dunder() -> None:
+    code = (
+        "from _snapscript_paths import OUTPUT_PATH\n"
+        "if __name__ == '__main__':\n"
+        "    open(OUTPUT_PATH, 'w').write('ok')\n"
     )
 
     result = safety_checker.check(code)

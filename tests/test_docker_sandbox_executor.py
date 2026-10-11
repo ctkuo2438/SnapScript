@@ -3,9 +3,10 @@ import subprocess
 import stat
 
 import pandas as pd
+import pytest
 
 from snapscript.config import AppConfig
-from snapscript.core import docker_sandbox_executor
+from snapscript.core import _docker_runtime, docker_sandbox_executor
 from snapscript.core.models import ExecutionResult, InputFileSpec
 
 
@@ -38,7 +39,7 @@ def test_build_docker_command_uses_default_image_and_workspace_mount(
 ) -> None:
     config = AppConfig()
 
-    command = docker_sandbox_executor._build_docker_command(tmp_path, config)
+    command = _docker_runtime.build_command(tmp_path, config)
 
     assert command[0:3] == ["docker", "run", "--rm"]
     assert "--network" in command
@@ -57,15 +58,13 @@ def test_build_docker_command_uses_default_image_and_workspace_mount(
     assert command[-2:] == ["python", "script.py"]
 
 
-def test_build_docker_command_omits_network_none_when_network_enabled(
+def test_build_docker_command_rejects_network_access(
     tmp_path: Path,
 ) -> None:
     config = AppConfig(docker_network_disabled=False)
 
-    command = docker_sandbox_executor._build_docker_command(tmp_path, config)
-
-    assert "--network" not in command
-    assert "none" not in command
+    with pytest.raises(ValueError, match="network"):
+        _docker_runtime.build_command(tmp_path, config)
 
 
 def test_build_docker_command_uses_configured_docker_values(
@@ -77,7 +76,7 @@ def test_build_docker_command_uses_configured_docker_values(
         docker_cpu_limit="2.0",
     )
 
-    command = docker_sandbox_executor._build_docker_command(tmp_path, config)
+    command = _docker_runtime.build_command(tmp_path, config)
 
     assert "custom-sandbox:dev" in command
     assert command[command.index("--memory") + 1] == "1g"
@@ -214,7 +213,7 @@ def test_execute_invokes_mocked_docker_and_copies_valid_csv_output(
             stderr="",
         )
 
-    monkeypatch.setattr(docker_sandbox_executor.subprocess, "run", fake_run)
+    monkeypatch.setattr(_docker_runtime.subprocess, "run", fake_run)
 
     result = docker_sandbox_executor.execute(
         "print('container run')\n",
@@ -256,7 +255,7 @@ def test_execute_prepares_workspace_permissions_before_docker_run(
         )
         return subprocess.CompletedProcess(command, returncode=0, stdout="", stderr="")
 
-    monkeypatch.setattr(docker_sandbox_executor.subprocess, "run", fake_run)
+    monkeypatch.setattr(_docker_runtime.subprocess, "run", fake_run)
 
     result = docker_sandbox_executor.execute(
         "print('container run')\n",
@@ -300,7 +299,7 @@ def test_execute_many_invokes_mocked_docker_with_named_input_paths(
         ).to_csv(workspace / "output.csv", index=False)
         return subprocess.CompletedProcess(command, returncode=0, stdout="", stderr="")
 
-    monkeypatch.setattr(docker_sandbox_executor.subprocess, "run", fake_run)
+    monkeypatch.setattr(_docker_runtime.subprocess, "run", fake_run)
 
     result = docker_sandbox_executor.execute_many(
         "print('container run')\n",
@@ -331,7 +330,7 @@ def test_run_docker_uses_configured_timeout(
         captured_timeout.append(int(kwargs["timeout"]))
         return subprocess.CompletedProcess(command, returncode=0, stdout="", stderr="")
 
-    monkeypatch.setattr(docker_sandbox_executor.subprocess, "run", fake_run)
+    monkeypatch.setattr(_docker_runtime.subprocess, "run", fake_run)
 
     result = docker_sandbox_executor._run_docker(
         tmp_path,
@@ -349,7 +348,12 @@ def test_run_docker_returns_failure_on_timeout(
 ) -> None:
     config = AppConfig(docker_timeout_seconds=3)
 
+    commands = []
+
     def fake_run(command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        commands.append(command)
+        if command[1:3] == ["rm", "--force"]:
+            return subprocess.CompletedProcess(command, 0, "", "")
         raise subprocess.TimeoutExpired(
             cmd=command,
             timeout=3,
@@ -357,7 +361,7 @@ def test_run_docker_returns_failure_on_timeout(
             stderr="partial stderr",
         )
 
-    monkeypatch.setattr(docker_sandbox_executor.subprocess, "run", fake_run)
+    monkeypatch.setattr(_docker_runtime.subprocess, "run", fake_run)
 
     result = docker_sandbox_executor._run_docker(
         tmp_path,
@@ -370,6 +374,36 @@ def test_run_docker_returns_failure_on_timeout(
     assert result.stdout == "partial stdout"
     assert "timed out after 3 seconds" in result.stderr
     assert "partial stderr" in result.stderr
+    container_name = commands[0][commands[0].index("--name") + 1]
+    assert commands[1] == ["docker", "rm", "--force", container_name]
+
+
+def test_docker_timeout_is_capped_at_thirty_seconds(tmp_path, monkeypatch) -> None:
+    timeouts = []
+
+    def fake_run(command, **kwargs):
+        timeouts.append(kwargs["timeout"])
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(_docker_runtime.subprocess, "run", fake_run)
+    result = docker_sandbox_executor._run_docker(tmp_path, AppConfig(docker_timeout_seconds=90), 0.0)
+
+    assert result.success
+    assert timeouts == [30]
+
+
+def test_docker_timeout_reports_cleanup_failure(tmp_path, monkeypatch) -> None:
+    def fake_run(command, **kwargs):
+        if command[1] == "run":
+            raise subprocess.TimeoutExpired(command, kwargs["timeout"])
+        assert kwargs["timeout"] == 5
+        return subprocess.CompletedProcess(command, 1, "", "daemon unavailable")
+
+    monkeypatch.setattr(_docker_runtime.subprocess, "run", fake_run)
+    result = docker_sandbox_executor._run_docker(tmp_path, AppConfig(), 0.0)
+
+    assert not result.success
+    assert "cleanup failed" in result.stderr.lower()
 
 
 def test_execute_returns_failure_when_docker_succeeds_without_output(
@@ -388,7 +422,7 @@ def test_execute_returns_failure_when_docker_succeeds_without_output(
             stderr="",
         )
 
-    monkeypatch.setattr(docker_sandbox_executor.subprocess, "run", fake_run)
+    monkeypatch.setattr(_docker_runtime.subprocess, "run", fake_run)
 
     result = docker_sandbox_executor.execute("print('no output')\n", input_path, output_path)
 
@@ -412,7 +446,7 @@ def test_execute_returns_failure_when_docker_output_is_empty(
         (workspace / "output.csv").write_text("", encoding="utf-8")
         return subprocess.CompletedProcess(command, returncode=0, stdout="", stderr="")
 
-    monkeypatch.setattr(docker_sandbox_executor.subprocess, "run", fake_run)
+    monkeypatch.setattr(_docker_runtime.subprocess, "run", fake_run)
 
     result = docker_sandbox_executor.execute("print('empty')\n", input_path, output_path)
 
@@ -435,7 +469,7 @@ def test_execute_returns_failure_when_docker_output_is_unreadable(
         (workspace / "output.csv").write_bytes(b"\xff\xfe\x00not-a-valid-csv")
         return subprocess.CompletedProcess(command, returncode=0, stdout="", stderr="")
 
-    monkeypatch.setattr(docker_sandbox_executor.subprocess, "run", fake_run)
+    monkeypatch.setattr(_docker_runtime.subprocess, "run", fake_run)
 
     result = docker_sandbox_executor.execute("print('broken')\n", input_path, output_path)
 
@@ -461,7 +495,7 @@ def test_execute_returns_failure_when_docker_command_fails(
             stderr="stderr from docker\n",
         )
 
-    monkeypatch.setattr(docker_sandbox_executor.subprocess, "run", fake_run)
+    monkeypatch.setattr(_docker_runtime.subprocess, "run", fake_run)
 
     result = docker_sandbox_executor.execute("raise RuntimeError()\n", input_path, output_path)
 

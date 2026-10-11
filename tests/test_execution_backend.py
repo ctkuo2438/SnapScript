@@ -21,13 +21,19 @@ def test_subprocess_backend_routes_to_sandbox_executor(
     expected = _success("subprocess")
 
     def fake_subprocess_execute(
-        code: str, input_path: Path, output_path: Path
+        code: str,
+        input_path: Path,
+        output_path: Path,
+        config: AppConfig | None = None,
     ) -> ExecutionResult:
         calls.append((code, input_path, output_path))
         return expected
 
     def fake_docker_execute(
-        code: str, input_path: Path, output_path: Path
+        code: str,
+        input_path: Path,
+        output_path: Path,
+        config: AppConfig | None = None,
     ) -> ExecutionResult:
         nonlocal docker_calls
         docker_calls += 1
@@ -58,6 +64,41 @@ def test_subprocess_backend_routes_to_sandbox_executor(
     assert docker_calls == 0
 
 
+def test_subprocess_backend_forwards_same_config_object(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from snapscript.core import execution_backend
+
+    seen_config: AppConfig | None = None
+
+    def fake_subprocess_execute(
+        code: str,
+        input_path: Path,
+        output_path: Path,
+        config: AppConfig | None = None,
+    ) -> ExecutionResult:
+        nonlocal seen_config
+        seen_config = config
+        return _success("subprocess")
+
+    monkeypatch.setattr(
+        execution_backend.sandbox_executor,
+        "execute",
+        fake_subprocess_execute,
+    )
+
+    config = AppConfig(sandbox_backend="subprocess")
+    execution_backend.execute(
+        "code",
+        tmp_path / "input.csv",
+        tmp_path / "output.csv",
+        config,
+    )
+
+    assert seen_config is config
+
+
 def test_docker_backend_routes_to_docker_sandbox_executor(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -69,14 +110,20 @@ def test_docker_backend_routes_to_docker_sandbox_executor(
     expected = _success("docker")
 
     def fake_subprocess_execute(
-        code: str, input_path: Path, output_path: Path
+        code: str,
+        input_path: Path,
+        output_path: Path,
+        config: AppConfig | None = None,
     ) -> ExecutionResult:
         nonlocal subprocess_calls
         subprocess_calls += 1
         return _success("subprocess")
 
     def fake_docker_execute(
-        code: str, input_path: Path, output_path: Path
+        code: str,
+        input_path: Path,
+        output_path: Path,
+        config: AppConfig | None = None,
     ) -> ExecutionResult:
         calls.append((code, input_path, output_path))
         return expected
@@ -116,7 +163,10 @@ def test_subprocess_backend_routes_multi_file_inputs_to_sandbox_executor(
     expected = _success("subprocess multi")
 
     def fake_subprocess_execute_many(
-        code: str, inputs: list[InputFileSpec], output_path: Path
+        code: str,
+        inputs: list[InputFileSpec],
+        output_path: Path,
+        config: AppConfig | None = None,
     ) -> ExecutionResult:
         calls.append((code, inputs, output_path))
         return expected
@@ -154,7 +204,10 @@ def test_docker_backend_routes_multi_file_inputs_to_docker_executor(
     expected = _success("docker multi")
 
     def fake_docker_execute_many(
-        code: str, inputs: list[InputFileSpec], output_path: Path
+        code: str,
+        inputs: list[InputFileSpec],
+        output_path: Path,
+        config: AppConfig | None = None,
     ) -> ExecutionResult:
         calls.append((code, inputs, output_path))
         return expected
@@ -193,13 +246,19 @@ def test_config_none_defaults_to_subprocess_backend(
     expected = _success("default")
 
     def fake_subprocess_execute(
-        code: str, input_path: Path, output_path: Path
+        code: str,
+        input_path: Path,
+        output_path: Path,
+        config: AppConfig | None = None,
     ) -> ExecutionResult:
         calls.append((code, input_path, output_path))
         return expected
 
     def fake_docker_execute(
-        code: str, input_path: Path, output_path: Path
+        code: str,
+        input_path: Path,
+        output_path: Path,
+        config: AppConfig | None = None,
     ) -> ExecutionResult:
         nonlocal docker_calls
         docker_calls += 1

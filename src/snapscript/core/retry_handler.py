@@ -24,6 +24,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from snapscript.config import AppConfig
+from snapscript.core._sandbox_files import validate_destination
 from snapscript.core import (
     code_generator,
     execution_backend,
@@ -48,8 +49,15 @@ def run(
     input_path: Path,
     output_path: Path,
     model: str | None = None,
+    config: AppConfig | None = None,
 ) -> ExecutionResult:
-    return _run_with_inputs(prompt, input_path, output_path, model=model)
+    return _run_with_inputs(
+        prompt,
+        input_path,
+        output_path,
+        model=model,
+        config=config,
+    )
 
 
 def run_many(
@@ -57,6 +65,7 @@ def run_many(
     inputs: list[InputFileSpec],
     output_path: Path,
     model: str | None = None,
+    config: AppConfig | None = None,
 ) -> ExecutionResult:
     try:
         validated_inputs = schema_inspector.validate_input_specs(inputs)
@@ -66,7 +75,13 @@ def run_many(
             stderr=str(exc),
             exit_code=1,
         )
-    return _run_with_inputs(prompt, validated_inputs, output_path, model=model)
+    return _run_with_inputs(
+        prompt,
+        validated_inputs,
+        output_path,
+        model=model,
+        config=config,
+    )
 
 
 # single-file and multi-file use the same retry logic,
@@ -76,8 +91,12 @@ def _run_with_inputs(
     input_path: Path | list[InputFileSpec], # single or multi input spec
     output_path: Path,
     model: str | None = None,
+    config: AppConfig | None = None,
 ) -> ExecutionResult:
-    config = AppConfig()
+    config = config if config is not None else AppConfig()
+    destination_error = validate_destination(input_path, output_path)
+    if destination_error:
+        return ExecutionResult(success=False, stderr=destination_error, exit_code=1)
     max_model_calls = min(config.max_retries + 1, MAX_MODEL_CALLS)
     current_prompt = prompt
     last_result: ExecutionResult | None = None
@@ -90,10 +109,17 @@ def _run_with_inputs(
         )
         # 1. generate code with the current prompt and LLM model
         # if model = None, use default model, else use fallback model
-        generated = code_generator.generate(current_prompt, model=generation_model)
+        generated = code_generator.generate(
+            current_prompt,
+            model=generation_model,
+            config=config,
+        )
 
         # 2. check code safety
-        safety_result = safety_checker.check(generated.code)
+        safety_result = safety_checker.check(
+            generated.code,
+            config=config,
+        )
         if not safety_result.is_safe or not safety_result.ast_valid:
             return _safety_failure(safety_result.violations)
      
@@ -104,7 +130,7 @@ def _run_with_inputs(
             generated.code,
             input_path,
             output_path,
-            config,
+            config=config,
         )
         last_result = result
         # if execution is successful, return the result immediately without retrying
@@ -134,6 +160,8 @@ def _should_retry_execution(result: ExecutionResult) -> bool:
     if result.success:
         return False
     if _is_timeout(result):
+        return False
+    if "Input validation:" in result.stderr or result.stderr.strip() == "Output is empty":
         return False
     return bool(result.stderr.strip())
 

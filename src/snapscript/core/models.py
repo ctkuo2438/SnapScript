@@ -6,8 +6,8 @@ from pathlib import Path
 from typing import Literal
 
 
-@dataclass
 # represents metadata about a single column in the input data
+@dataclass
 class ColumnInfo:
     name: str
     dtype: str
@@ -16,8 +16,8 @@ class ColumnInfo:
     sample_values: list[str] = field(default_factory=list)
 
 
-@dataclass
 # represents the overall schema and metadata of the input file, used for prompt generation and safety checks
+@dataclass
 class SchemaReport:
     filename: str
     file_type: str
@@ -86,15 +86,15 @@ class RewrittenTask:
     model: str
 
 
-@dataclass
 # represents the payload for prompt generation, including system and user prompts
+@dataclass
 class PromptPayload:
     system_prompt: str
     user_prompt: str
 
 
-@dataclass
 # represents the generated code and related metadata after prompt generation
+@dataclass
 class GeneratedScript:
     code: str
     raw_response: str
@@ -103,16 +103,16 @@ class GeneratedScript:
     output_tokens: int = 0
 
 
-@dataclass
 # represents the result of safety checks performed on the generated code, including any violations found
+@dataclass
 class SafetyResult:
     is_safe: bool
     violations: list[str] = field(default_factory=list)
     ast_valid: bool = True
 
 
-@dataclass
 # represents the result of executing the generated code, including success status, output, and any files produced
+@dataclass
 class ExecutionResult:
     success: bool
     stdout: str = ""

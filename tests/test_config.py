@@ -14,7 +14,7 @@ def test_app_config_defaults_cover_phase_1_limits() -> None:
     assert config.fallback_model
     assert config.default_model != config.fallback_model
     assert config.max_tokens == 4096
-    assert config.temperature == 0.0
+    assert config.temperature is None
 
     assert config.execution_timeout_seconds == 30
     assert config.max_retries == 2

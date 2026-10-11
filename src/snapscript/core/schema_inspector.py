@@ -1,5 +1,5 @@
 '''
-conver the user's input csv or excel file into a SchemaReport for prompt_builder to use when generating prompts. 
+convert the user's input csv or excel file into a SchemaReport for prompt_builder to use when generating prompts.
 This module is focused on schema inspection and reporting, not on data transformation or cleaning.
 
 Streamlit UI / CLI
@@ -62,31 +62,27 @@ from snapscript.core.models import (
 class SchemaInspectionError(Exception):
     """Base error for schema inspection failures."""
 
-
 class MissingInputFileError(SchemaInspectionError):
     """Raised when the requested input file does not exist."""
-
 
 class UnsupportedFileTypeError(SchemaInspectionError):
     """Raised when the input file extension is not supported."""
 
-
 class UnreadableFileError(SchemaInspectionError):
     """Raised when a supported file cannot be read."""
-
 
 class InputFileTooLargeError(SchemaInspectionError):
     """Raised when the input file exceeds configured size limits."""
 
-
-SUPPORTED_EXTENSIONS = frozenset({".csv", ".xlsx", ".xls"})
+SUPPORTED_EXTENSIONS = frozenset({".csv", ".xlsx"})
 LOGICAL_NAME_PATTERN = re.compile(r"^[a-z][a-z0-9_]*$")
 
 
+# inspect single input file and return a SchemaReport
 # main entry point for schema inspection, called by the API handler after file upload, 
 #   returns a SchemaReport or raises a SchemaInspectionError
-def inspect(path: Path, sheet: str | None = None) -> SchemaReport:
-    config = AppConfig()
+def inspect(path: Path, sheet: str | None = None, config: AppConfig | None = None) -> SchemaReport:
+    config = config if config is not None else AppConfig()
     input_path = Path(path)
     # 1. validate file existence, type, and size before attempting to read
     _validate_path(input_path, config)
@@ -107,13 +103,22 @@ def inspect(path: Path, sheet: str | None = None) -> SchemaReport:
     except Exception as exc:
         raise UnreadableFileError(f"Could not read file: {input_path}") from exc
 
-def inspect_many(inputs: list[InputFileSpec]) -> MultiFileSchemaReport:
+# inspect multiple input files and return a MultiFileSchemaReport
+def inspect_many(
+    inputs: list[InputFileSpec],
+    config: AppConfig | None = None,
+) -> MultiFileSchemaReport:
+    config = config if config is not None else AppConfig()
     validated_inputs = validate_input_specs(inputs)
     files = [
         NamedSchemaReport(
             name=input_spec.name,
             # reuse the existing single-file inspector for each named input file
-            schema=inspect(input_spec.path, sheet=input_spec.sheet),
+            schema=inspect(
+                input_spec.path,
+                sheet=input_spec.sheet,
+                config=config,
+            ),
         )
         for input_spec in validated_inputs
     ]
@@ -125,8 +130,10 @@ def inspect_many(inputs: list[InputFileSpec]) -> MultiFileSchemaReport:
 def validate_input_specs(inputs: list[InputFileSpec]) -> list[InputFileSpec]:
     if not inputs:
         raise SchemaInspectionError("At least one input file is required")
+    if len(inputs) > 2:
+        raise SchemaInspectionError("Phase 4A supports at most two input files")
 
-    seen_names: set[str] = set()
+    seen_names: set[str] = set() # avoid duplicate names
     validated_inputs: list[InputFileSpec] = []
     for input_spec in inputs:
         name = _validate_logical_name(input_spec.name)
@@ -137,7 +144,7 @@ def validate_input_specs(inputs: list[InputFileSpec]) -> list[InputFileSpec]:
             InputFileSpec(
                 name=name,
                 path=Path(input_spec.path),
-                sheet=input_spec.sheet,
+                sheet=input_spec.sheet, # since excel files can have multiple sheets
                 display_filename=input_spec.display_filename,
             )
         )
@@ -156,7 +163,7 @@ def _validate_path(path: Path, config: AppConfig) -> None:
         raise MissingInputFileError(f"File not found: {path}")
     if not path.is_file():
         raise UnreadableFileError(f"Input path is not a file: {path}")
-    if path.suffix.lower() not in SUPPORTED_EXTENSIONS: # if not .csv/.xlsx/.xls, then raise unsupported file type error
+    if path.suffix.lower() not in SUPPORTED_EXTENSIONS: # if not .csv/.xlsx, then raise unsupported file type error
         raise UnsupportedFileTypeError(f"Unsupported file type: {path.suffix}")
 
     file_size = path.stat().st_size # get the file size in bytes
@@ -188,32 +195,32 @@ def _inspect_csv(path: Path, config: AppConfig) -> SchemaReport:
 
 
 def _inspect_excel(path: Path, sheet: str | None, config: AppConfig) -> SchemaReport:
-    excel_file = pd.ExcelFile(path)
-    sheet_names = [str(name) for name in excel_file.sheet_names]
-    
-    # if no sheet is specified, use the first sheet by default
-    #   Otherwise, validate that the requested sheet exists
-    selected_sheet = sheet or sheet_names[0]
-    if selected_sheet not in sheet_names:
-        raise UnreadableFileError(f"Sheet not found: {selected_sheet}")
+    with pd.ExcelFile(path) as excel_file:
+        sheet_names = [str(name) for name in excel_file.sheet_names]
 
-    sample = pd.read_excel(
-        excel_file,
-        sheet_name=selected_sheet,
-        nrows=config.schema_inspect_rows,
-    )
-    sample = _truncate_columns(sample, config)
+        # if no sheet is specified, use the first sheet by default
+        #   Otherwise, validate that the requested sheet exists
+        selected_sheet = sheet or sheet_names[0]
+        if selected_sheet not in sheet_names:
+            raise UnreadableFileError(f"Sheet not found: {selected_sheet}")
 
-    return SchemaReport(
-        filename=path.name,
-        file_type=path.suffix.lower().lstrip("."), # xlsx or xls
-        row_count=_count_excel_rows(path, selected_sheet, sample),
-        file_size_bytes=path.stat().st_size,
-        columns=_build_columns(sample),
-        sample_rows=_sample_rows(sample, config),
-        encoding="utf-8",
-        sheet_names=sheet_names,
-    )
+        sample = pd.read_excel(
+            excel_file,
+            sheet_name=selected_sheet,
+            nrows=config.schema_inspect_rows,
+        )
+        sample = _truncate_columns(sample, config)
+
+        return SchemaReport(
+            filename=path.name,
+            file_type=path.suffix.lower().lstrip("."),
+            row_count=_count_excel_rows(path, selected_sheet),
+            file_size_bytes=path.stat().st_size,
+            columns=_build_columns(sample),
+            sample_rows=_sample_rows(sample, config),
+            encoding="utf-8",
+            sheet_names=sheet_names,
+        )
 
 
 def _detect_encoding(path: Path) -> str:
@@ -238,10 +245,7 @@ def _count_csv_rows(path: Path, encoding: str) -> int:
 
 
 # count the number of rows in the excel sheet without loading the entire sheet into memory
-def _count_excel_rows(path: Path, sheet: str, sample: pd.DataFrame) -> int:
-    if path.suffix.lower() != ".xlsx":
-        return len(sample) # for .xls files, directly return the number of rows
-
+def _count_excel_rows(path: Path, sheet: str) -> int:
     # if .xlsx file, use openpyxl to read the sheet in read-only mode and get the max_row property, 
     #   which is more efficient than loading with pandas and can handle larger files without memory issues
     workbook = load_workbook(path, read_only=True, data_only=True)
@@ -255,9 +259,22 @@ def _count_excel_rows(path: Path, sheet: str, sample: pd.DataFrame) -> int:
 def _truncate_columns(df: pd.DataFrame, config: AppConfig) -> pd.DataFrame:
     truncated = df.copy()
     # convert the column names to string and truncate to max_column_name_chars to avoid issues with very long column names in the prompt
-    truncated.columns = [
-        str(column)[: config.max_column_name_chars] for column in truncated.columns
-    ]
+    seen_counts: dict[str, int] = {}
+    used_names: set[str] = set()
+    column_names: list[str] = []
+    for column in truncated.columns:
+        base_name = str(column)[: config.max_column_name_chars]
+        seen_counts[base_name] = seen_counts.get(base_name, 0) + 1
+        if seen_counts[base_name] == 1:
+            candidate = base_name
+        else:
+            candidate = f"{base_name}_{seen_counts[base_name]}"
+        while candidate in used_names:
+            seen_counts[base_name] += 1
+            candidate = f"{base_name}_{seen_counts[base_name]}"
+        used_names.add(candidate)
+        column_names.append(candidate)
+    truncated.columns = column_names
     return truncated
 
 

@@ -39,6 +39,44 @@ def _input_specs(tmp_path: Path) -> list[InputFileSpec]:
     ]
 
 
+@pytest.mark.parametrize("error", ["Input validation: products missing column pid", "Output is empty"])
+def test_run_does_not_retry_input_validation_errors(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, error: str,
+) -> None:
+    calls = []
+
+    def fake_generate(prompt, model=None, config=None):
+        calls.append(prompt)
+        return _script("print('validation')")
+
+    monkeypatch.setattr(code_generator, "generate", fake_generate)
+    monkeypatch.setattr(retry_handler.execution_backend, "execute", lambda *a, **k: _failure(error))
+
+    result = retry_handler.run(_prompt(), tmp_path / "input.csv", tmp_path / "out.csv")
+
+    assert result.success is False
+    assert result.stderr == error
+    assert len(calls) == 1
+
+
+def test_run_rejects_source_output_before_generation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "input.csv"
+    source.write_text("id\n1\n")
+
+    def unexpected_generate(*args, **kwargs):
+        pytest.fail("Source/output overlap must be rejected before generation")
+
+    monkeypatch.setattr(code_generator, "generate", unexpected_generate)
+
+    result = retry_handler.run(_prompt(), source, source)
+
+    assert not result.success
+    assert "overwrite" in result.stderr
+    assert source.read_text() == "id\n1\n"
+
+
 def test_run_retries_traceback_failures_and_uses_fallback_on_final_call(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -54,12 +92,14 @@ def test_run_retries_traceback_failures_and_uses_fallback_on_final_call(
     ]
 
     def fake_generate(
-        prompt: PromptPayload, model: str | None = None
+        prompt: PromptPayload,
+        model: str | None = None,
+        config: AppConfig | None = None,
     ) -> GeneratedScript:
         generated_calls.append((prompt, model))
         return scripts[len(generated_calls) - 1]
 
-    def fake_check(code: str) -> SafetyResult:
+    def fake_check(code: str, config: AppConfig | None = None) -> SafetyResult:
         safety_codes.append(code)
         return SafetyResult(is_safe=True)
 
@@ -108,7 +148,9 @@ def test_run_retries_stderr_context_without_traceback(
     calls = 0
 
     def fake_generate(
-        prompt: PromptPayload, model: str | None = None
+        prompt: PromptPayload,
+        model: str | None = None,
+        config: AppConfig | None = None,
     ) -> GeneratedScript:
         nonlocal calls
         calls += 1
@@ -128,7 +170,7 @@ def test_run_retries_stderr_context_without_traceback(
     monkeypatch.setattr(
         retry_handler.safety_checker,
         "check",
-        lambda code: SafetyResult(is_safe=True),
+        lambda code, config=None: SafetyResult(is_safe=True),
     )
     monkeypatch.setattr(retry_handler.execution_backend, "execute", fake_execute)
 
@@ -145,7 +187,9 @@ def test_run_does_not_retry_safety_violations(
     execute_calls = 0
 
     def fake_generate(
-        prompt: PromptPayload, model: str | None = None
+        prompt: PromptPayload,
+        model: str | None = None,
+        config: AppConfig | None = None,
     ) -> GeneratedScript:
         nonlocal generate_calls
         generate_calls += 1
@@ -165,7 +209,7 @@ def test_run_does_not_retry_safety_violations(
     monkeypatch.setattr(
         retry_handler.safety_checker,
         "check",
-        lambda code: SafetyResult(
+        lambda code, config=None: SafetyResult(
             is_safe=False,
             violations=["Blocked unsafe import: os"],
         ),
@@ -199,12 +243,12 @@ def test_run_treats_ast_invalid_safety_result_as_failure_before_execution(
     monkeypatch.setattr(
         retry_handler.code_generator,
         "generate",
-        lambda _prompt, model=None: _script("x ="),
+        lambda _prompt, model=None, config=None: _script("x ="),
     )
     monkeypatch.setattr(
         retry_handler.safety_checker,
         "check",
-        lambda code: SafetyResult(
+        lambda code, config=None: SafetyResult(
             is_safe=True,
             ast_valid=False,
             violations=["Syntax error"],
@@ -226,7 +270,9 @@ def test_run_does_not_retry_timeouts(
     generate_calls = 0
 
     def fake_generate(
-        prompt: PromptPayload, model: str | None = None
+        prompt: PromptPayload,
+        model: str | None = None,
+        config: AppConfig | None = None,
     ) -> GeneratedScript:
         nonlocal generate_calls
         generate_calls += 1
@@ -236,7 +282,7 @@ def test_run_does_not_retry_timeouts(
     monkeypatch.setattr(
         retry_handler.safety_checker,
         "check",
-        lambda code: SafetyResult(is_safe=True),
+        lambda code, config=None: SafetyResult(is_safe=True),
     )
     monkeypatch.setattr(
         retry_handler.execution_backend,
@@ -268,7 +314,9 @@ def test_run_does_not_retry_provider_or_config_errors(
     generate_calls = 0
 
     def fake_generate(
-        prompt: PromptPayload, model: str | None = None
+        prompt: PromptPayload,
+        model: str | None = None,
+        config: AppConfig | None = None,
     ) -> GeneratedScript:
         nonlocal generate_calls
         generate_calls += 1
@@ -288,7 +336,9 @@ def test_run_caps_total_model_calls_at_three(
     generate_calls = 0
 
     def fake_generate(
-        prompt: PromptPayload, model: str | None = None
+        prompt: PromptPayload,
+        model: str | None = None,
+        config: AppConfig | None = None,
     ) -> GeneratedScript:
         nonlocal generate_calls
         generate_calls += 1
@@ -298,7 +348,7 @@ def test_run_caps_total_model_calls_at_three(
     monkeypatch.setattr(
         retry_handler.safety_checker,
         "check",
-        lambda code: SafetyResult(is_safe=True),
+        lambda code, config=None: SafetyResult(is_safe=True),
     )
     monkeypatch.setattr(
         retry_handler.execution_backend,
@@ -320,7 +370,9 @@ def test_run_does_not_use_fallback_for_initial_call_when_retries_disabled(
     models: list[str | None] = []
 
     def fake_generate(
-        prompt: PromptPayload, model: str | None = None
+        prompt: PromptPayload,
+        model: str | None = None,
+        config: AppConfig | None = None,
     ) -> GeneratedScript:
         models.append(model)
         return _script("code")
@@ -329,7 +381,7 @@ def test_run_does_not_use_fallback_for_initial_call_when_retries_disabled(
     monkeypatch.setattr(
         retry_handler.safety_checker,
         "check",
-        lambda code: SafetyResult(is_safe=True),
+        lambda code, config=None: SafetyResult(is_safe=True),
     )
     monkeypatch.setattr(
         retry_handler.execution_backend,
@@ -346,6 +398,44 @@ def test_run_does_not_use_fallback_for_initial_call_when_retries_disabled(
 
     assert result.success is True
     assert models == [None]
+
+
+def test_run_respects_passed_config_max_retries(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    generate_calls = 0
+
+    def fake_generate(
+        prompt: PromptPayload,
+        model: str | None = None,
+        config: AppConfig | None = None,
+    ) -> GeneratedScript:
+        nonlocal generate_calls
+        generate_calls += 1
+        return _script("code")
+
+    monkeypatch.setattr(retry_handler.code_generator, "generate", fake_generate)
+    monkeypatch.setattr(
+        retry_handler.safety_checker,
+        "check",
+        lambda code, config=None: SafetyResult(is_safe=True),
+    )
+    monkeypatch.setattr(
+        retry_handler.execution_backend,
+        "execute",
+        lambda code, input_path, output_path, config=None: _failure(
+            "Traceback\nRuntimeError: bad"
+        ),
+    )
+
+    retry_handler.run(
+        _prompt(),
+        tmp_path / "input.csv",
+        tmp_path / "out.csv",
+        config=AppConfig(max_retries=0),
+    )
+
+    assert generate_calls == 1
 
 
 def test_retry_handler_core_has_no_ui_dependencies() -> None:
@@ -365,10 +455,10 @@ def test_run_checks_safety_before_execution_backend(
     monkeypatch.setattr(
         retry_handler.code_generator,
         "generate",
-        lambda _prompt, model=None: _script("safe code"),
+        lambda _prompt, model=None, config=None: _script("safe code"),
     )
 
-    def fake_check(code: str) -> SafetyResult:
+    def fake_check(code: str, config: AppConfig | None = None) -> SafetyResult:
         events.append(f"safety:{code}")
         return SafetyResult(is_safe=True)
 
@@ -399,13 +489,15 @@ def test_run_many_generates_checks_safety_then_executes_validated_inputs(
     executed_inputs: list[list[InputFileSpec]] = []
 
     def fake_generate(
-        prompt: PromptPayload, model: str | None = None
+        prompt: PromptPayload,
+        model: str | None = None,
+        config: AppConfig | None = None,
     ) -> GeneratedScript:
         events.append("generate")
         generated_calls.append((prompt, model))
         return _script("safe multi code")
 
-    def fake_check(code: str) -> SafetyResult:
+    def fake_check(code: str, config: AppConfig | None = None) -> SafetyResult:
         events.append(f"safety:{code}")
         return SafetyResult(is_safe=True)
 
@@ -454,7 +546,9 @@ def test_run_many_does_not_retry_safety_violations(
     execute_calls = 0
 
     def fake_generate(
-        prompt: PromptPayload, model: str | None = None
+        prompt: PromptPayload,
+        model: str | None = None,
+        config: AppConfig | None = None,
     ) -> GeneratedScript:
         nonlocal generate_calls
         generate_calls += 1
@@ -474,7 +568,7 @@ def test_run_many_does_not_retry_safety_violations(
     monkeypatch.setattr(
         retry_handler.safety_checker,
         "check",
-        lambda code: SafetyResult(
+        lambda code, config=None: SafetyResult(
             is_safe=False,
             violations=["Blocked unsafe import: os"],
         ),
@@ -513,12 +607,12 @@ def test_run_many_treats_ast_invalid_safety_result_as_failure_before_execution(
     monkeypatch.setattr(
         retry_handler.code_generator,
         "generate",
-        lambda _prompt, model=None: _script("x ="),
+        lambda _prompt, model=None, config=None: _script("x ="),
     )
     monkeypatch.setattr(
         retry_handler.safety_checker,
         "check",
-        lambda code: SafetyResult(
+        lambda code, config=None: SafetyResult(
             is_safe=True,
             ast_valid=False,
             violations=["Syntax error"],
@@ -546,7 +640,9 @@ def test_run_many_retries_stderr_failure_then_succeeds(
     executed_codes: list[str] = []
 
     def fake_generate(
-        prompt: PromptPayload, model: str | None = None
+        prompt: PromptPayload,
+        model: str | None = None,
+        config: AppConfig | None = None,
     ) -> GeneratedScript:
         generated_calls.append((prompt, model))
         return _script(f"code v{len(generated_calls)}")
@@ -566,7 +662,7 @@ def test_run_many_retries_stderr_failure_then_succeeds(
     monkeypatch.setattr(
         retry_handler.safety_checker,
         "check",
-        lambda code: SafetyResult(is_safe=True),
+        lambda code, config=None: SafetyResult(is_safe=True),
     )
     monkeypatch.setattr(retry_handler.execution_backend, "execute", fake_execute)
 
@@ -628,12 +724,14 @@ def test_run_many_validation_failures_return_without_generation_or_execution(
     calls = {"generate": 0, "safety": 0, "execute": 0}
 
     def fake_generate(
-        prompt: PromptPayload, model: str | None = None
+        prompt: PromptPayload,
+        model: str | None = None,
+        config: AppConfig | None = None,
     ) -> GeneratedScript:
         calls["generate"] += 1
         return _script("code")
 
-    def fake_check(code: str) -> SafetyResult:
+    def fake_check(code: str, config: AppConfig | None = None) -> SafetyResult:
         calls["safety"] += 1
         return SafetyResult(is_safe=True)
 

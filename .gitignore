@@ -7,6 +7,7 @@ __pycache__/
 .ruff_cache/
 .mypy_cache/
 .coverage
+.coverage.*
 htmlcov/
 dist/
 build/
@@ -19,14 +20,33 @@ build/
 logs/
 *.log
 *.jsonl
+*.pem
+*.key
+*.p12
+*.pfx
+
+# Local datasets and generated results (keep tests/fixtures tracked)
+/data/
+/uploads/
+/outputs/
+/tmp/
+/temp/
+*_snapscript_output.csv
+*_snapscript_output.xlsx
 
 # macOS
 .DS_Store
 
 # Per-agent local working directories
 .claude/
-.codex/
-.gstack/
+.codex/*
+!.codex/skills/
+.agents/
+
+# Local tool artifacts
+/.lavish/
+/.cmuxterm/
+/~/
 
 # Backup files
 *.bak

@@ -14,14 +14,9 @@ from helpers.streamlit_helpers import (
     FakeStreamlit,
     FakeUploadedFile,
     _button_disabled,
-    _has_placeholder_message,
     _multi_schema,
+    isolate_audit_log,
 )
-
-
-@pytest.fixture(autouse=True)
-def isolate_audit_log(monkeypatch, tmp_path: Path) -> None:
-    monkeypatch.setattr(web, "AUDIT_LOG_PATH", tmp_path / "audit.jsonl")
 
 
 def test_main_stores_valid_uploaded_file_without_pipeline_calls(
@@ -59,7 +54,6 @@ def test_main_displays_invalid_upload_error_without_pipeline_calls(
     assert fake_st.session_state["uploaded_file_bytes"] is None
     assert fake_st.session_state["error_message"] == "Unsupported file type: .txt"
     assert ("error", ("Unsupported file type: .txt",), {}) in fake_st.calls
-    assert not _has_placeholder_message(fake_st.calls)
 
 def test_main_stores_task_text_in_session_state(monkeypatch) -> None:
     fake_st = FakeStreamlit(task_text="  Keep large orders. ")
@@ -81,7 +75,6 @@ def test_main_disables_generate_when_upload_is_missing(
     web.main()
 
     assert _button_disabled(fake_st.calls) is True
-    assert not _has_placeholder_message(fake_st.calls)
 
 def test_main_disables_generate_when_task_text_is_blank(
     monkeypatch,
@@ -97,7 +90,6 @@ def test_main_disables_generate_when_task_text_is_blank(
     web.main()
 
     assert _button_disabled(fake_st.calls) is True
-    assert not _has_placeholder_message(fake_st.calls)
 
 def test_main_disables_generate_when_run_limit_reached(
     monkeypatch,
@@ -128,7 +120,7 @@ def test_main_generate_click_validates_then_calls_pipeline_helper(
     monkeypatch.setattr(
         web,
         "run_uploaded_task",
-        lambda file_bytes, suffix, task_text, uploaded_file_name=None, audit_metadata=None: (
+        lambda file_bytes, suffix, task_text, uploaded_file_name=None, audit_metadata=None, config=None: (
             calls.append((file_bytes, suffix, task_text))
             or (
                 web.ExecutionResult(success=True),
@@ -150,7 +142,6 @@ def test_main_generate_click_validates_then_calls_pipeline_helper(
             " Keep large orders. ",
         )
     ]
-    assert not _has_placeholder_message(fake_st.calls)
 
 def test_run_uploaded_tasks_many_calls_multi_file_core_flow_with_temp_paths(
     monkeypatch,
@@ -161,7 +152,10 @@ def test_run_uploaded_tasks_many_calls_multi_file_core_flow_with_temp_paths(
     calls: list[str] = []
     seen_specs: list[list[InputFileSpec]] = []
 
-    def fake_inspect_many(specs: list[InputFileSpec]) -> MultiFileSchemaReport:
+    def fake_inspect_many(
+        specs: list[InputFileSpec],
+        config: object | None = None,
+    ) -> MultiFileSchemaReport:
         calls.append("inspect_many")
         seen_specs.append(specs)
         assert [spec.name for spec in specs] == ["orders", "products"]
@@ -178,6 +172,7 @@ def test_run_uploaded_tasks_many_calls_multi_file_core_flow_with_temp_paths(
     def fake_build_many(
         task_text: str,
         multi_schema: MultiFileSchemaReport,
+        config: object | None = None,
     ) -> PromptPayload:
         calls.append("build_many")
         assert task_text == "Merge orders and products."
@@ -191,6 +186,7 @@ def test_run_uploaded_tasks_many_calls_multi_file_core_flow_with_temp_paths(
         prompt: PromptPayload,
         specs: list[InputFileSpec],
         output_path: Path,
+        config: object | None = None,
     ) -> ExecutionResult:
         calls.append("run_many")
         seen_specs.append(specs)
@@ -422,6 +418,7 @@ def test_main_generate_click_increments_run_count_before_pipeline(
         _task_text: str,
         uploaded_file_name: str | None = None,
         audit_metadata: dict[str, object] | None = None,
+        config: object | None = None,
     ) -> tuple[web.ExecutionResult, bytes, str]:
         assert fake_st.session_state["run_count"] == 3
         assert fake_st.session_state["last_run_timestamp"] == 20.0
@@ -453,7 +450,7 @@ def test_main_generate_click_updates_last_run_timestamp(
     monkeypatch.setattr(
         web,
         "run_uploaded_task",
-        lambda _file_bytes, _suffix, _task_text, uploaded_file_name=None, audit_metadata=None: (
+        lambda _file_bytes, _suffix, _task_text, uploaded_file_name=None, audit_metadata=None, config=None: (
             web.ExecutionResult(success=True),
             b"order_id,total\n1,10\n",
             web.derive_output_file_name(uploaded_file_name, ".csv"),
@@ -538,7 +535,7 @@ def test_main_success_stores_preview_and_renders_download(
     monkeypatch.setattr(
         web,
         "run_uploaded_task",
-        lambda _file_bytes, _suffix, _task_text, uploaded_file_name=None, audit_metadata=None: (
+        lambda _file_bytes, _suffix, _task_text, uploaded_file_name=None, audit_metadata=None, config=None: (
             web.ExecutionResult(success=True),
             output_bytes,
             web.derive_output_file_name(uploaded_file_name, ".csv"),
@@ -587,7 +584,7 @@ def test_main_failed_generate_clears_preview_and_hides_download(
     monkeypatch.setattr(
         web,
         "run_uploaded_task",
-        lambda _file_bytes, _suffix, _task_text, uploaded_file_name=None, audit_metadata=None: (
+        lambda _file_bytes, _suffix, _task_text, uploaded_file_name=None, audit_metadata=None, config=None: (
             web.ExecutionResult(
                 success=False,
                 stderr="RuntimeError: transform failed",

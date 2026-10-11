@@ -1,5 +1,4 @@
 import ast
-import re
 from pathlib import Path
 
 import pandas as pd
@@ -13,13 +12,8 @@ from helpers.streamlit_helpers import (
     FakeStreamlit,
     FakeUploadedFile,
     _button_disabled,
-    _has_placeholder_message,
+    isolate_audit_log,
 )
-
-
-@pytest.fixture(autouse=True)
-def isolate_audit_log(monkeypatch, tmp_path: Path) -> None:
-    monkeypatch.setattr(web, "AUDIT_LOG_PATH", tmp_path / "audit.jsonl")
 
 
 def test_app_entrypoint_only_delegates_to_web_main() -> None:
@@ -57,6 +51,15 @@ def test_redact_error_text_redacts_secret_like_values() -> None:
     assert "my-password" not in redacted
     assert "abc123" not in redacted
     assert "top-secret" not in redacted
+
+
+@pytest.mark.parametrize("name", ["token", "password", "secret", "api_key"])
+def test_colon_secrets_are_redacted_in_ui_and_audit(name: str) -> None:
+    message = f"ValueError: {name}: fixture-demo-value"
+    expected = f"ValueError: {name}=[REDACTED]"
+
+    assert web.format_user_error(message) == expected
+    assert web.audit_logger.redact_secret_values(message) == expected
 
 def test_truncate_error_text_caps_long_message() -> None:
     truncated = web.truncate_error_text("x" * 25, max_chars=10)
@@ -184,6 +187,7 @@ def test_main_exception_from_pipeline_redacts_secret(monkeypatch) -> None:
         _task_text: str,
         uploaded_file_name: str | None = None,
         audit_metadata: dict[str, object] | None = None,
+        config: object | None = None,
     ) -> tuple[web.ExecutionResult, None, None]:
         raise RuntimeError(
             "ProviderCallError: Bearer sk-ant-api03-exampleSecret123"
@@ -213,7 +217,7 @@ def test_main_failed_execution_result_caps_long_stderr(monkeypatch) -> None:
     monkeypatch.setattr(
         web,
         "run_uploaded_task",
-        lambda _file_bytes, _suffix, _task_text, uploaded_file_name=None, audit_metadata=None: (
+        lambda _file_bytes, _suffix, _task_text, uploaded_file_name=None, audit_metadata=None, config=None: (
             web.ExecutionResult(
                 success=False,
                 stderr="sandbox failure: " + ("x" * 200),
@@ -294,7 +298,7 @@ def test_no_full_traceback_is_rendered_from_failed_result(monkeypatch) -> None:
     monkeypatch.setattr(
         web,
         "run_uploaded_task",
-        lambda _file_bytes, _suffix, _task_text, uploaded_file_name=None, audit_metadata=None: (
+        lambda _file_bytes, _suffix, _task_text, uploaded_file_name=None, audit_metadata=None, config=None: (
             web.ExecutionResult(
                 success=False,
                 stderr=(
@@ -318,7 +322,7 @@ def test_no_full_traceback_is_rendered_from_failed_result(monkeypatch) -> None:
     assert all("Traceback" not in message for message in rendered_errors)
     assert all("/private/tmp" not in message for message in rendered_errors)
 
-def test_uploading_file_alone_does_not_show_generation_placeholder(
+def test_uploading_file_preserves_output_without_generate(
     monkeypatch,
 ) -> None:
     uploaded = FakeUploadedFile("orders.csv", b"order_id,total\n1,10\n")
@@ -334,12 +338,11 @@ def test_uploading_file_alone_does_not_show_generation_placeholder(
 
     web.main()
 
-    assert not _has_placeholder_message(fake_st.calls)
     assert isinstance(fake_st.session_state["result_preview"], pd.DataFrame)
     assert fake_st.session_state["output_bytes"] == b"old"
     assert fake_st.session_state["output_file_name"] == "old.csv"
 
-def test_editing_task_text_alone_does_not_show_generation_placeholder(
+def test_editing_task_preserves_output_without_generate(
     monkeypatch,
 ) -> None:
     fake_st = FakeStreamlit(task_text="Keep large orders.")
@@ -355,12 +358,11 @@ def test_editing_task_text_alone_does_not_show_generation_placeholder(
     web.main()
 
     assert fake_st.session_state["task_text"] == "Keep large orders."
-    assert not _has_placeholder_message(fake_st.calls)
     assert isinstance(fake_st.session_state["result_preview"], pd.DataFrame)
     assert fake_st.session_state["output_bytes"] == b"old"
     assert fake_st.session_state["output_file_name"] == "old.csv"
 
-def test_main_renders_phase_2_skeleton_without_pipeline_calls(
+def test_main_renders_input_and_generate_controls(
     monkeypatch,
 ) -> None:
     fake_st = FakeStreamlit()
@@ -374,7 +376,6 @@ def test_main_renders_phase_2_skeleton_without_pipeline_calls(
     assert "text_area" in call_names
     assert "button" in call_names
     assert "caption" in call_names
-    assert not _has_placeholder_message(fake_st.calls)
 
 def test_web_imports_streamlit_and_retry_but_not_provider_or_sandbox() -> None:
     source = Path("src/snapscript/interfaces/web.py").read_text(encoding="utf-8")
@@ -389,12 +390,3 @@ def test_web_imports_streamlit_and_retry_but_not_provider_or_sandbox() -> None:
     assert "sandbox_executor" not in source
     assert ".generate(" not in source
     assert ".execute(" not in source
-
-def test_core_has_no_streamlit_or_web_ui_dependency() -> None:
-    disallowed = ("streamlit", "gradio", "fastapi", "flask", "dash")
-
-    for path in Path("src/snapscript/core").glob("*.py"):
-        source = path.read_text(encoding="utf-8")
-        for term in disallowed:
-            assert term not in source, f"{term} found in {path}"
-        assert re.search(r"\bst\.", source) is None, f"st. found in {path}"

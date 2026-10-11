@@ -10,6 +10,7 @@ from pathlib import Path
 
 from rich.console import Console
 
+from snapscript.config import AppConfig
 from snapscript.core import (
     code_generator,
     prompt_builder,
@@ -27,7 +28,7 @@ from snapscript.core.models import (
 )
 
 
-SUPPORTED_EXTENSIONS = {".csv", ".xlsx", ".xls"}
+SUPPORTED_EXTENSIONS = {".csv", ".xlsx"}
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -108,6 +109,8 @@ def main(argv: list[str] | None = None) -> int:
         os.environ["ANTHROPIC_API_KEY"] = args.api_key
 
     try:
+        config = AppConfig()
+
         if args.verbose:
             console.print("Verbose mode enabled")
 
@@ -117,14 +120,23 @@ def main(argv: list[str] | None = None) -> int:
                 error_console.print(validation_error)
                 return 1
 
-            schema = schema_inspector.inspect(input_mode, sheet=args.sheet)
+            schema = schema_inspector.inspect(
+                input_mode,
+                sheet=args.sheet,
+                config=config,
+            )
             _show_schema_summary(console, schema)
-            prompt = prompt_builder.build(args.task, schema)
+            prompt = prompt_builder.build(
+                args.task,
+                schema,
+                config=config,
+            )
             run_result = lambda: retry_handler.run(
                 prompt,
                 input_mode,
                 output_path,
                 model=args.model,
+                config=config,
             )
         else:
             if args.sheet:
@@ -136,14 +148,22 @@ def main(argv: list[str] | None = None) -> int:
                 error_console.print(validation_error)
                 return 1
 
-            schema = schema_inspector.inspect_many(input_mode)
+            schema = schema_inspector.inspect_many(
+                input_mode,
+                config=config,
+            )
             _show_multi_schema_summary(console, schema)
-            prompt = prompt_builder.build_many(args.task, schema)
+            prompt = prompt_builder.build_many(
+                args.task,
+                schema,
+                config=config,
+            )
             run_result = lambda: retry_handler.run_many(
                 prompt,
                 input_mode,
                 output_path,
                 model=args.model,
+                config=config,
             )
 
         if not args.dry_run:
@@ -155,10 +175,17 @@ def main(argv: list[str] | None = None) -> int:
             _show_execution_result(console, error_console, result)
             return _execution_status(result)
 
-        generated = code_generator.generate(prompt, model=args.model)
+        generated = code_generator.generate(
+            prompt,
+            model=args.model,
+            config=config,
+        )
         _show_generation_metadata(console, generated)
 
-        safety = safety_checker.check(generated.code)
+        safety = safety_checker.check(
+            generated.code,
+            config=config,
+        )
         _show_safety_result(console, safety)
         if not safety.is_safe or not safety.ast_valid:
             error_console.print("\n".join(safety.violations))

@@ -61,7 +61,8 @@ ALLOWED_INTERNAL_IMPORTS = frozenset({"_snapscript_paths"})
 WINDOWS_ABSOLUTE_PATH = re.compile(r"^[a-zA-Z]:[\\/]")
 
 
-def check(code: str) -> SafetyResult:
+def check(code: str, config: AppConfig | None = None) -> SafetyResult:
+    config = config if config is not None else AppConfig()
     try:
         tree = ast.parse(code)
     except SyntaxError as exc:
@@ -71,7 +72,7 @@ def check(code: str) -> SafetyResult:
             ast_valid=False,
         )
 
-    visitor = _SafetyVisitor(AppConfig())
+    visitor = _SafetyVisitor(config)
     visitor.visit(tree)
 
     return SafetyResult(
@@ -101,16 +102,22 @@ class _SafetyVisitor(ast.NodeVisitor):
             self._check_import(node.module)
         self.generic_visit(node)
 
+    def visit_Name(self, node: ast.Name) -> None:
+        if node.id == "__builtins__":
+            self.violations.append("Blocked unsafe name: __builtins__")
+        self.generic_visit(node)
+
     # check function calls, ex: pd.read_csv(), open(), eval(), exec(), etc
     def visit_Call(self, node: ast.Call) -> None:
         call_name = _call_name(node.func)
-        if call_name in BLOCKED_CALLS:
+        is_bare_call = isinstance(node.func, ast.Name)
+        if is_bare_call and call_name in BLOCKED_CALLS:
             self.violations.append(f"Blocked unsafe call: {call_name}")
         if call_name == "open": # if is open() call, then do extra checks on the file path
             self._check_open_call(node)
         self.generic_visit(node)
 
-    # check attribute access, ex: os.system, subprocess.Popen, etc
+    # validate an imported module name against the blocklist and allowlist
     def _check_import(self, module_name: str) -> None:
         root_name = module_name.split(".", 1)[0] # get the root module name, ex: os.path -> os
         if root_name in BLOCKED_IMPORTS:
@@ -119,7 +126,7 @@ class _SafetyVisitor(ast.NodeVisitor):
         if root_name not in self._allowed_import_roots():
             self.violations.append(f"Import is not allowed: {module_name}")
 
-    # extract the function name from a call node, ex: pd.read_csv() -> read_csv
+    # compute the set of allowed root module names from config plus internal modules
     def _allowed_import_roots(self) -> set[str]:
         return {
             module.split(".", 1)[0]

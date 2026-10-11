@@ -1,5 +1,9 @@
 '''
-CLI entrypoint wrapper
+CLI entrypoint wrapper (dev mode)
+
+uv run python main.py "task" --file orders.csv ...
+
+interfaces.cli.main
 '''
 
 import sys

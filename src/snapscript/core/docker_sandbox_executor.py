@@ -14,36 +14,54 @@ from __future__ import annotations
 import json
 import re
 import shutil
-import subprocess
 import tempfile
 import time
 from pathlib import Path
 
-import pandas as pd
-
 from snapscript.config import AppConfig
+from snapscript.core import schema_inspector
+from snapscript.core._docker_runtime import CONTAINER_WORKDIR, run as _run_docker
+from snapscript.core._sandbox_files import validate_destination, validate_output as _validate_output
 from snapscript.core.models import ExecutionResult, InputFileSpec
 
 
 SCRIPT_NAME = "script.py"
 PATHS_MODULE_NAME = "_snapscript_paths.py"
 # DEFAULT_DOCKER_IMAGE = "snapscript-sandbox:local"
-CONTAINER_WORKDIR = "/workspace"
-DOCKER_PIDS_LIMIT = "128"
 SAFE_FILENAME_PATTERN = re.compile(r"[^A-Za-z0-9._-]+")
 
 
-def execute(code: str, input_path: Path, output_path: Path) -> ExecutionResult:
+def execute(
+    code: str,
+    input_path: Path,
+    output_path: Path,
+    config: AppConfig | None = None,
+) -> ExecutionResult:
+    config = config if config is not None else AppConfig()
     input_spec = InputFileSpec(name="input", path=Path(input_path))
-    return _execute_with_inputs(code, [input_spec], Path(output_path), single_file=True)
+    return _execute_with_inputs(
+        code,
+        [input_spec],
+        Path(output_path),
+        single_file=True,
+        config=config,
+    )
 
 
 def execute_many(
     code: str,
     inputs: list[InputFileSpec],
     output_path: Path,
+    config: AppConfig | None = None,
 ) -> ExecutionResult:
-    return _execute_with_inputs(code, inputs, Path(output_path), single_file=False)
+    config = config if config is not None else AppConfig()
+    return _execute_with_inputs(
+        code,
+        inputs,
+        Path(output_path),
+        single_file=False,
+        config=config,
+    )
 
 
 def _execute_with_inputs(
@@ -51,9 +69,16 @@ def _execute_with_inputs(
     inputs: list[InputFileSpec],
     output_path: Path,
     single_file: bool,
+    config: AppConfig,
 ) -> ExecutionResult:
-    config = AppConfig()
     start_time = time.monotonic()
+    try:
+        inputs = schema_inspector.validate_input_specs(inputs)
+    except schema_inspector.SchemaInspectionError as exc:
+        return _failure_result(str(exc), 1, "", _duration(start_time))
+    destination_error = validate_destination(inputs, output_path)
+    if destination_error:
+        return _failure_result(destination_error, 1, "", _duration(start_time))
 
     with tempfile.TemporaryDirectory(prefix="snapscript_docker_") as workspace_name:
         workspace = Path(workspace_name).resolve()
@@ -165,92 +190,6 @@ def _prepare_workspace_permissions(workspace: Path) -> None:
             child.chmod(0o666) # direct files, 0o666: read/write for owner/group/others
 
 
-'''
-Ex:
-docker run --rm --memory 512m --cpus 0.5 --pids-limit 128 -v /tmp/snapscript_docker_abc123:/workspace -w /workspace snapscript-sandbox:local python script.py
-'''
-def _build_docker_command(workspace: Path, config: AppConfig) -> list[str]:
-    command = [
-        "docker",
-        "run",
-        "--rm",
-    ]
-    # if disable docker network for better security, add --network none to the command
-    if config.docker_network_disabled:
-        command.extend(["--network", "none"])
-
-    command.extend(
-        [
-            "--memory",
-            config.docker_memory_limit,
-            "--cpus",
-            config.docker_cpu_limit,
-            "--pids-limit",
-            DOCKER_PIDS_LIMIT,
-            "-v",
-            f"{workspace.resolve()}:{CONTAINER_WORKDIR}",
-            "-w",
-            CONTAINER_WORKDIR,
-            config.docker_image,
-            "python",
-            SCRIPT_NAME,
-        ]
-    )
-    return command
-
-
-def _run_docker(workspace: Path, config: AppConfig, start_time: float,) -> ExecutionResult:
-    command = _build_docker_command(workspace, config)
-    try:
-        completed = subprocess.run(
-            command,
-            capture_output=True,
-            text=True,
-            timeout=config.docker_timeout_seconds,
-            check=False,
-        )
-    except subprocess.TimeoutExpired as exc:
-        stdout = exc.stdout if isinstance(exc.stdout, str) else ""
-        stderr = exc.stderr if isinstance(exc.stderr, str) else ""
-        message = (
-            f"Docker execution timed out after "
-            f"{config.docker_timeout_seconds} seconds"
-        )
-        if stderr:
-            message = f"{message}\n{stderr}"
-        return _failure_result(
-            stderr=message,
-            exit_code=-1,
-            stdout=stdout,
-            duration=_duration(start_time),
-        )
-    # if user doesn't have docker intalled or shell cannot find docker executable, 
-    #   return failure result with error message
-    except FileNotFoundError as exc:
-        return _failure_result(
-            stderr=f"Docker executable not found: {exc}",
-            exit_code=127,
-            stdout="",
-            duration=_duration(start_time),
-        )
-
-    if completed.returncode != 0:
-        return _failure_result(
-            stderr=completed.stderr,
-            exit_code=completed.returncode,
-            stdout=completed.stdout,
-            duration=_duration(start_time),
-        )
-
-    return ExecutionResult(
-        success=True,
-        stdout=completed.stdout,
-        stderr=completed.stderr,
-        execution_time_seconds=_duration(start_time),
-        exit_code=completed.returncode,
-    )
-
-
 def _validate_and_copy_output(temp_output_path: Path, requested_output_path: Path) -> str | None:
     validation_error = _validate_output(temp_output_path)
     if validation_error is not None:
@@ -258,25 +197,6 @@ def _validate_and_copy_output(temp_output_path: Path, requested_output_path: Pat
 
     requested_output_path.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(temp_output_path, requested_output_path)
-    return None
-
-
-def _validate_output(output_path: Path) -> str | None:
-    if not output_path.exists():
-        return "Output file was not created"
-    if output_path.stat().st_size == 0:
-        return "Output is empty"
-
-    try:
-        if output_path.suffix.lower() in {".xlsx", ".xls"}:
-            preview = pd.read_excel(output_path, nrows=1)
-        else:
-            preview = pd.read_csv(output_path, nrows=1)
-    except Exception as exc:
-        return f"Output unreadable: {exc}"
-
-    if preview.empty:
-        return "Output is empty"
     return None
 
 

@@ -6,6 +6,18 @@ Track prompt changes during Days 8-10 prompt iteration.
 
 - Initial changelog for prompt iteration notes.
 
+## 2026-10-10 AI CSV Merge Spec
+
+- Updated multi-file guidance in `core/prompt_builder.py` to follow `spec.md`:
+  default inner join, infer only a sole common key, validate actual keys/types/nulls,
+  preserve duplicate pairings, and report actionable input errors.
+- The first real-provider gate exposed an implicit `pid` to `sku` substitution.
+  Clarified that a named shared key must exist verbatim in both inputs; distinct
+  key names require an explicit per-input request. Re-tested missing/ambiguous keys.
+- `prompts/system.txt` and single-file prompting are unchanged.
+- Deterministic and opt-in real-provider verification is recorded in
+  `docs/ai_csv_merge_verification.md`.
+
 ## 2026-05-15 Task 20 First-attempt Gate Fix
 
 - Command: custom real-provider harness wrapping `code_generator.generate` to count model calls per CLI gate task.

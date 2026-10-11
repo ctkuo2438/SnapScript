@@ -28,29 +28,24 @@ from anthropic import Anthropic
 from snapscript.config import AppConfig
 from snapscript.core.models import GeneratedScript, PromptPayload
 
-
 class CodeGenerationError(Exception):
     """Base error for code generation failures."""
-
 
 class UnsupportedProviderError(CodeGenerationError):
     """Raised when the configured provider is not implemented."""
 
-
 class ProviderCallError(CodeGenerationError):
     """Raised when the configured provider call fails."""
 
-
 class EmptyProviderResponseError(CodeGenerationError):
     """Raised when the provider returns no usable text."""
-
 
 class InvalidGeneratedCodeError(CodeGenerationError):
     """Raised when generated text is not valid Python syntax."""
 
 
-def generate(prompt: PromptPayload, model: str | None = None) -> GeneratedScript:
-    config = AppConfig() # default_model is "claude-sonnet-4-20250514", fallback_model is "claude-opus-4-20250514"
+def generate(prompt: PromptPayload, model: str | None = None, config: AppConfig | None = None) -> GeneratedScript:
+    config = config if config is not None else AppConfig()
     provider = config.llm_provider.lower()
     selected_model = model or config.default_model
 
@@ -77,13 +72,15 @@ def generate(prompt: PromptPayload, model: str | None = None) -> GeneratedScript
 def _call_provider(prompt: PromptPayload, model: str, config: AppConfig) -> Any:
     try:
         client = Anthropic()
-        return client.messages.create(
-            model=model,
-            max_tokens=config.max_tokens,
-            temperature=config.temperature,
-            system=prompt.system_prompt,
-            messages=[{"role": "user", "content": prompt.user_prompt}],
-        )
+        request_kwargs: dict[str, Any] = {
+            "model": model,
+            "max_tokens": config.max_tokens,
+            "system": prompt.system_prompt,
+            "messages": [{"role": "user", "content": prompt.user_prompt}],
+        }
+        if config.temperature is not None:
+            request_kwargs["temperature"] = config.temperature
+        return client.messages.create(**request_kwargs)
     except Exception as exc:
         raise ProviderCallError("Provider call failed") from exc
 
@@ -169,16 +166,16 @@ def _looks_like_python_start(line: str) -> bool:
     )
 
 
+# use ast.parse to check if the code is valid Python syntax, without executing it
 def _validate_python(code: str) -> None:
     try:
-        # use ast.parse to check if the code is valid Python syntax, without executing it
         ast.parse(code)
     except SyntaxError as exc:
         raise InvalidGeneratedCodeError("Generated code is not valid Python") from exc
 
 
+# Anthropic response has a usage attribute with input_tokens and output_tokens fields
 def _usage_value(response: Any, field_name: str) -> int:
-    # Anthropic response has a usage attribute with input_tokens and output_tokens fields
     usage = getattr(response, "usage", None)
     value = getattr(usage, field_name, 0)
     if isinstance(value, int):

@@ -13,10 +13,12 @@ DEFAULT_DOCKER_CPU_LIMIT = "1.0"
 class AppConfig:
     # LLM provider
     llm_provider: str = "anthropic"
-    default_model: str = "claude-sonnet-4-20250514"
-    fallback_model: str = "claude-opus-4-20250514"
+    default_model: str = "claude-sonnet-5"
+    fallback_model: str = "claude-opus-4-8"
     max_tokens: int = 4096
-    temperature: float = 0.0
+    # None uses the model default and omits the provider parameter;
+    # a float is an explicit override for models that still accept it.
+    temperature: float | None = None
 
     # Execution, default is subprocess sandbox, 
     #   can be switched to docker via SNAPSCRIPT_SANDBOX_BACKEND=docker
@@ -71,7 +73,6 @@ class AppConfig:
     allowed_imports: frozenset[str] = frozenset(
         {
             "pandas",
-            "pd",
             "openpyxl",
             "csv",
             "json",

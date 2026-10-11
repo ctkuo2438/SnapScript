@@ -99,6 +99,7 @@ def _mock_provider(
         system_prompt: str,
         user_prompt: str,
         model: str | None,
+        config: AppConfig,
     ) -> tuple[str, str, str]:
         if calls is not None:
             calls.append(
@@ -374,13 +375,25 @@ def test_rewriter_does_not_create_output_files(
     assert list(tmp_path.iterdir()) == []
 
 
-def test_rewritten_task_rejects_invented_column(
+@pytest.mark.parametrize(
+    "rewritten_text",
+    [
+        "Filter rows using a threshold of 1000 for amount.",
+        "Create column total by multiplying amount by 2.",
+        "Keep rows where amount > 1000, sorted by descending order.",
+        "保留 amount 大於 1000 的資料。",
+    ],
+)
+def test_rewritten_task_accepts_natural_language_and_new_output_columns(
     monkeypatch: pytest.MonkeyPatch,
+    rewritten_text: str,
 ) -> None:
-    _mock_provider(monkeypatch, "Filter rows where discount is greater than 0.")
+    _mock_provider(monkeypatch, rewritten_text)
 
-    with pytest.raises(TaskRewriteError, match="unknown column"):
-        rewrite_task("filter discounts", _single_schema())
+    rewritten = rewrite_task(rewritten_text, _single_schema())
+
+    assert rewritten.original_task == rewritten_text
+    assert rewritten.rewritten_task == rewritten_text
 
 
 def test_rewritten_task_accepts_article_before_join_column(
@@ -511,7 +524,12 @@ def test_call_provider_uses_configured_anthropic_client(
         lambda: AppConfig(default_model="default-model", max_tokens=1234),
     )
 
-    text, provider, model = task_rewriter._call_provider("system", "user", None)
+    text, provider, model = task_rewriter._call_provider(
+        "system",
+        "user",
+        None,
+        config=AppConfig(default_model="default-model", max_tokens=1234),
+    )
 
     assert text == "Filter rows where amount is greater than 1000."
     assert provider == "anthropic"
@@ -519,9 +537,47 @@ def test_call_provider_uses_configured_anthropic_client(
     call = _FakeAnthropic.instances[0].messages.calls[0]
     assert call["model"] == "default-model"
     assert call["max_tokens"] == 1234
-    assert call["temperature"] == 0.0
+    assert "temperature" not in call
     assert call["system"] == "system"
     assert call["messages"] == [{"role": "user", "content": "user"}]
+
+
+def test_call_provider_sends_temperature_when_explicitly_configured(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _TextBlock:
+        text = "Filter rows where amount is greater than 1000."
+
+    class _Response:
+        content = [_TextBlock()]
+
+    class _Messages:
+        def __init__(self) -> None:
+            self.calls: list[dict[str, object]] = []
+
+        def create(self, **kwargs: object) -> _Response:
+            self.calls.append(kwargs)
+            return _Response()
+
+    class _FakeAnthropic:
+        instances: list["_FakeAnthropic"] = []
+
+        def __init__(self) -> None:
+            self.messages = _Messages()
+            self.instances.append(self)
+
+    _FakeAnthropic.instances = []
+    monkeypatch.setattr(task_rewriter, "Anthropic", _FakeAnthropic)
+
+    task_rewriter._call_provider(
+        "system",
+        "user",
+        None,
+        config=AppConfig(temperature=0.0),
+    )
+
+    call = _FakeAnthropic.instances[0].messages.calls[0]
+    assert call["temperature"] == 0.0
 
 
 def test_call_provider_wraps_sdk_failure_without_cause(
@@ -534,7 +590,7 @@ def test_call_provider_wraps_sdk_failure_without_cause(
     monkeypatch.setattr(task_rewriter, "Anthropic", BrokenAnthropic)
 
     with pytest.raises(TaskRewriteError) as exc_info:
-        task_rewriter._call_provider("system", "user", None)
+        task_rewriter._call_provider("system", "user", None, config=AppConfig())
 
     assert str(exc_info.value) == "Task rewrite provider call failed"
     assert exc_info.value.__cause__ is None

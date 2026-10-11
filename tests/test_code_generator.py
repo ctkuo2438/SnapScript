@@ -18,6 +18,12 @@ class _TextBlock:
         self.text = text
 
 
+class _ThinkingBlock:
+    def __init__(self, text: object | None = None) -> None:
+        if text is not None:
+            self.text = text
+
+
 class _Usage:
     input_tokens = 12
     output_tokens = 8
@@ -83,9 +89,22 @@ def test_generate_calls_configured_provider_with_separate_prompts(
     call = _FakeAnthropic.instances[0].messages.calls[0]
     assert call["model"] == "default-model"
     assert call["max_tokens"] == 1234
-    assert call["temperature"] == 0.0
+    assert "temperature" not in call
     assert call["system"] == "system instructions"
     assert call["messages"] == [{"role": "user", "content": "user prompt with schema"}]
+
+
+def test_generate_sends_temperature_when_explicitly_configured(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _FakeAnthropic.instances = []
+    _FakeAnthropic.response = _Response("```python\nprint('ok')\n```")
+    monkeypatch.setattr(code_generator, "Anthropic", _FakeAnthropic)
+
+    code_generator.generate(_payload(), config=AppConfig(temperature=0.0))
+
+    call = _FakeAnthropic.instances[0].messages.calls[0]
+    assert call["temperature"] == 0.0
 
 
 def test_generate_uses_model_override(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -167,6 +186,13 @@ def test_generate_raises_for_invalid_python(
 
     with pytest.raises(InvalidGeneratedCodeError):
         code_generator.generate(_payload())
+
+
+def test_extract_text_skips_thinking_blocks() -> None:
+    class _ResponseWithThinking:
+        content = [_ThinkingBlock(), _ThinkingBlock(text=123), _TextBlock("print('hi')")]
+
+    assert code_generator._extract_text(_ResponseWithThinking()) == "print('hi')"
 
 
 def test_code_generator_core_has_no_ui_execution_or_safety_dependencies() -> None:

@@ -313,9 +313,9 @@ def test_cli_gate_task(
     original_check = cli.safety_checker.check
     original_execute = cli.retry_handler.execution_backend.execute
 
-    def check_spy(code: str) -> SafetyResult:
+    def check_spy(code: str, config=None) -> SafetyResult:
         safety_calls.append(code) # append the code being checked to the safety_calls list
-        return original_check(code) # call the original safety check function and return its result
+        return original_check(code, config=config) # call the original safety check function and return its result
 
     def execute_spy(
         code: str,
@@ -360,9 +360,11 @@ def test_cli_gate_task(
 
 def _mock_generate(
     code: str, calls: list[PromptPayload]
-) -> Callable[[PromptPayload, str | None], GeneratedScript]:
+) -> Callable[[PromptPayload, str | None, object | None], GeneratedScript]:
     def fake_generate(
-        prompt: PromptPayload, model: str | None = None
+        prompt: PromptPayload,
+        model: str | None = None,
+        config: object | None = None,
     ) -> GeneratedScript:
         assert model is None
         calls.append(prompt)

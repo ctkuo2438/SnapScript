@@ -1,11 +1,20 @@
 ## Project: SnapScript
 
-A CLI/web tool that lets users describe data processing tasks in natural 
+A CLI/web/MCP tool that lets users describe data processing tasks in natural
 language, auto-generates Python scripts, and executes them in a local sandbox.
 MVP focuses on CSV/Excel processing.
 
+## Spec-driven development
+
+Read and follow [AGENTS.md](AGENTS.md), the relevant feature spec
+([CSV Merge](spec.md) or [MCP](specs/mcp.md)), and
+[docs/development.md](docs/development.md) for feature work. Implement only the gaps,
+test and repair them, and record acceptance evidence in the CSV Merge
+[report](docs/ai_csv_merge_verification.md) or the MCP spec.
+Use the shared workflow; no separate Claude-specific planning framework is needed.
+
 Tech stack: Python, Claude API (anthropic SDK), pandas, Streamlit (Phase 2).
-Full SDS: see snapscript-sds.md
+Architecture and roadmap: see [docs/development.md](docs/development.md).
 
 ## gstack skills available
 Use /browse for all web browsing tasks.
