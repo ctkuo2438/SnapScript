@@ -59,6 +59,21 @@ def clear_output_state(state: MutableMapping[str, object]) -> None:
     state["output_file_name"] = None
 
 
+def update_input_state(state: MutableMapping[str, object], **values: object) -> None:
+    """Invalidate derived results only when the input context actually changes."""
+    changed = any(state.get(key) != value for key, value in values.items())
+    state.update(values)
+    if changed:
+        clear_output_state(state)
+        state["rewritten_task"] = None
+        state["rewrite_error_message"] = None
+        if any(key != "task_text" for key in values):
+            state.pop("_schema_cache", None)
+        if state.get("error_source") == ERROR_SOURCE_EXECUTION:
+            state["error_message"] = None
+            state["error_source"] = None
+
+
 def begin_accepted_run(state: MutableMapping[str, object], now: float | None = None) -> None:
     state["error_message"] = None
     state["error_source"] = None

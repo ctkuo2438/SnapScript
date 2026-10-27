@@ -1,9 +1,11 @@
 from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
 from snapscript.core import docker_sandbox_executor, sandbox_executor
 from snapscript.core.models import ExecutionResult, InputFileSpec
+from snapscript.core._sandbox_files import commit_output
 
 
 @pytest.fixture(params=[sandbox_executor, docker_sandbox_executor], ids=["subprocess", "docker"])
@@ -85,3 +87,18 @@ def test_executor_rejects_third_input(executor, inputs, tmp_path):
 
     assert not result.success
     assert "two" in result.stderr
+
+
+def test_parallel_exclusive_commits_preserve_the_winning_file(tmp_path):
+    sources = [tmp_path / "a.csv", tmp_path / "b.csv"]
+    payloads = [b"value\nA\n", b"value\nB\n"]
+    for source, payload in zip(sources, payloads):
+        source.write_bytes(payload)
+    output = tmp_path / "result.csv"
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(lambda source: commit_output(source, output, overwrite=False), sources))
+    assert results.count(None) == 1
+    assert sum("already exists" in result for result in results if result) == 1
+    assert output.read_bytes() in payloads
+    assert [source.read_bytes() for source in sources] == payloads
+    assert not list(tmp_path.glob(".snapscript-*"))

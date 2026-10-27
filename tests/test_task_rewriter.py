@@ -1,13 +1,16 @@
 from copy import deepcopy
+import json
 from pathlib import Path
 
 import pytest
 
 from snapscript.config import AppConfig
-from snapscript.core import task_rewriter
+from snapscript.core import task_rewriter, provider
 from snapscript.core.models import (
     ColumnInfo,
     MultiFileSchemaReport,
+    ProviderReply,
+    ProviderCallMetrics,
     NamedSchemaReport,
     RewrittenTask,
     SchemaReport,
@@ -100,7 +103,7 @@ def _mock_provider(
         user_prompt: str,
         model: str | None,
         config: AppConfig,
-    ) -> tuple[str, str, str]:
+    ) -> ProviderReply:
         if calls is not None:
             calls.append(
                 {
@@ -109,9 +112,39 @@ def _mock_provider(
                     "model": "" if model is None else model,
                 }
             )
-        return text, "anthropic", model or "default-model"
+        return ProviderReply(text, ProviderCallMetrics("anthropic", model or "default-model"))
 
     monkeypatch.setattr(task_rewriter, "_call_provider", fake_call_provider)
+
+
+@pytest.mark.parametrize("text", [
+    "Sum import value by country", "Filter rows where class label is A",
+    "Count pandas sightings by region", 'Keep rows where status is "active"',
+    "Keep rows where status is 'active'",
+])
+def test_rewrite_preserves_natural_language_and_quoted_values(monkeypatch, text):
+    _mock_provider(monkeypatch, text)
+    assert rewrite_task("Improve this task", _single_schema()).rewritten_task == text
+
+
+@pytest.mark.parametrize("text,expected", [
+    ('"Keep status active"', "Keep status active"),
+    ("'Keep status active'", "Keep status active"),
+    ('Task: Keep status "active"', 'Keep status "active"'),
+])
+def test_rewrite_strips_only_balanced_outer_quotes(text, expected):
+    assert task_rewriter._strip_rewrite_output(text) == expected
+
+
+@pytest.mark.parametrize("path", [
+    "/etc/private", "/opt/private", "/mnt/private", "~/private",
+    "C:/private/data", r"\\server\share\private", '"/home/private records/data"',
+])
+def test_rewrite_redacts_and_rejects_real_path_forms(path):
+    text = f"Process values from {path}"
+    assert "[path]" in task_rewriter._redact_paths_and_filenames(text)
+    with pytest.raises(TaskRewriteError, match="paths"):
+        task_rewriter._validate_rewritten_task(text)
 
 
 def test_rewrite_task_returns_rewritten_task(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -152,7 +185,7 @@ def test_provider_boundary_is_mocked_without_real_provider(
 ) -> None:
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     monkeypatch.setattr(
-        task_rewriter,
+        provider,
         "Anthropic",
         lambda: pytest.fail("Anthropic client should not be constructed"),
     )
@@ -233,8 +266,8 @@ def test_multi_file_prompt_includes_logical_file_names(
     rewrite_task("merge these", _multi_schema())
 
     user_prompt = calls[0]["user_prompt"]
-    assert 'name="orders"' in user_prompt
-    assert 'name="products"' in user_prompt
+    schema = json.loads(user_prompt.split("<schema>\n", 1)[1].split("\n</schema>", 1)[0])
+    assert [file["logical_name"] for file in schema["files"]] == ["orders", "products"]
 
 
 def test_multi_file_prompt_does_not_include_real_file_paths(
@@ -492,110 +525,32 @@ def test_rewrite_does_not_mutate_schema_or_advice(
     assert advice == before_advice
 
 
-def test_call_provider_uses_configured_anthropic_client(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    class _TextBlock:
-        text = "Filter rows where amount is greater than 1000."
+def test_rewrite_uses_shared_provider_and_keeps_metrics(monkeypatch: pytest.MonkeyPatch) -> None:
+    from helpers.provider_helpers import FakeAnthropic, Response
 
-    class _Response:
-        content = [_TextBlock()]
-
-    class _Messages:
-        def __init__(self) -> None:
-            self.calls: list[dict[str, object]] = []
-
-        def create(self, **kwargs: object) -> _Response:
-            self.calls.append(kwargs)
-            return _Response()
-
-    class _FakeAnthropic:
-        instances: list["_FakeAnthropic"] = []
-
-        def __init__(self) -> None:
-            self.messages = _Messages()
-            self.instances.append(self)
-
-    _FakeAnthropic.instances = []
-    monkeypatch.setattr(task_rewriter, "Anthropic", _FakeAnthropic)
-    monkeypatch.setattr(
-        task_rewriter,
-        "AppConfig",
-        lambda: AppConfig(default_model="default-model", max_tokens=1234),
-    )
-
-    text, provider, model = task_rewriter._call_provider(
-        "system",
-        "user",
-        None,
-        config=AppConfig(default_model="default-model", max_tokens=1234),
-    )
-
-    assert text == "Filter rows where amount is greater than 1000."
-    assert provider == "anthropic"
-    assert model == "default-model"
-    call = _FakeAnthropic.instances[0].messages.calls[0]
-    assert call["model"] == "default-model"
-    assert call["max_tokens"] == 1234
-    assert "temperature" not in call
-    assert call["system"] == "system"
-    assert call["messages"] == [{"role": "user", "content": "user"}]
+    FakeAnthropic.instances = []
+    FakeAnthropic.response = Response("Filter rows where amount is greater than 1000.", model="actual-rewrite-model")
+    monkeypatch.setattr(provider, "Anthropic", FakeAnthropic)
+    result = rewrite_task("filter orders", _single_schema(), config=AppConfig(provider_timeout_seconds=2))
+    client = FakeAnthropic.instances[-1]
+    assert result.api_call.model == result.model == "actual-rewrite-model"
+    assert result.api_call.input_tokens == 12
+    assert client.options == {"timeout": 2, "max_retries": 1}
+    assert client.closed
 
 
-def test_call_provider_sends_temperature_when_explicitly_configured(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    class _TextBlock:
-        text = "Filter rows where amount is greater than 1000."
+def test_rewrite_wraps_sdk_failure_with_safe_category(monkeypatch: pytest.MonkeyPatch) -> None:
+    from helpers.provider_helpers import FakeAnthropic
 
-    class _Response:
-        content = [_TextBlock()]
-
-    class _Messages:
-        def __init__(self) -> None:
-            self.calls: list[dict[str, object]] = []
-
-        def create(self, **kwargs: object) -> _Response:
-            self.calls.append(kwargs)
-            return _Response()
-
-    class _FakeAnthropic:
-        instances: list["_FakeAnthropic"] = []
-
-        def __init__(self) -> None:
-            self.messages = _Messages()
-            self.instances.append(self)
-
-    _FakeAnthropic.instances = []
-    monkeypatch.setattr(task_rewriter, "Anthropic", _FakeAnthropic)
-
-    task_rewriter._call_provider(
-        "system",
-        "user",
-        None,
-        config=AppConfig(temperature=0.0),
-    )
-
-    call = _FakeAnthropic.instances[0].messages.calls[0]
-    assert call["temperature"] == 0.0
-
-
-def test_call_provider_wraps_sdk_failure_without_cause(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    class BrokenAnthropic:
-        def __init__(self) -> None:
-            raise RuntimeError("ANTHROPIC_API_KEY=sk-ant-secret")
-
-    monkeypatch.setattr(task_rewriter, "Anthropic", BrokenAnthropic)
-
-    with pytest.raises(TaskRewriteError) as exc_info:
-        task_rewriter._call_provider("system", "user", None, config=AppConfig())
-
-    assert str(exc_info.value) == "Task rewrite provider call failed"
-    assert exc_info.value.__cause__ is None
-    assert "sk-ant" not in str(exc_info.value)
-    assert "ANTHROPIC_API_KEY" not in str(exc_info.value)
+    FakeAnthropic.response = RuntimeError("ANTHROPIC_API_KEY=sk-ant-secret")
+    monkeypatch.setattr(provider, "Anthropic", FakeAnthropic)
+    with pytest.raises(TaskRewriteError) as captured:
+        rewrite_task("filter orders", _single_schema())
+    assert str(captured.value) == "Task rewrite provider call failed"
+    assert captured.value.__cause__ is None
+    assert captured.value.category == "provider_failure"
+    assert captured.value.api_calls[0].model == AppConfig().default_model
+    assert FakeAnthropic.instances[-1].closed
 
 
 def test_rewritten_task_accepts_join_type_words_as_non_columns(

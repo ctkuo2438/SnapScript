@@ -1,25 +1,4 @@
-from __future__ import annotations
-
-from collections.abc import Callable
-from pathlib import Path
-
 import pytest
-
-from snapscript.core.models import (
-    MultiFileSchemaReport,
-    NamedSchemaReport,
-    RewrittenTask,
-    SchemaReport,
-    TaskAdvice,
-)
-
-
-@pytest.fixture(autouse=True)
-def isolate_audit_log(monkeypatch, tmp_path: Path) -> None:
-    from snapscript.interfaces import web
-
-    monkeypatch.setattr(web, "AUDIT_LOG_PATH", tmp_path / "audit.jsonl")
-
 
 class FakeUploadedFile:
     def __init__(self, name: str, file_bytes: bytes) -> None:
@@ -28,7 +7,6 @@ class FakeUploadedFile:
 
     def getvalue(self) -> bytes:
         return self._file_bytes
-
 
 class FakeSidebar:
     def __init__(self, parent: "FakeStreamlit") -> None:
@@ -46,6 +24,8 @@ class FakeSidebar:
     def code(self, *args: object, **kwargs: object) -> None:
         self.parent.calls.append(("sidebar.code", args, kwargs))
 
+    def warning(self, *args: object, **kwargs: object) -> None:
+        self.parent.calls.append(("sidebar.warning", args, kwargs))
 
 class FakeStreamlit:
     def __init__(
@@ -129,6 +109,9 @@ class FakeStreamlit:
     def warning(self, *args: object, **kwargs: object) -> None:
         self.calls.append(("warning", args, kwargs))
 
+    def rerun(self) -> None:
+        self.calls.append(("rerun", (), {}))
+
     def error(self, *args: object, **kwargs: object) -> None:
         self.calls.append(("error", args, kwargs))
 
@@ -141,85 +124,7 @@ class FakeStreamlit:
     def download_button(self, *args: object, **kwargs: object) -> None:
         self.calls.append(("download_button", args, kwargs))
 
-
-class FakeRewriteError(Exception):
-    pass
-
-
-def _fake_rewriter_module(
-    rewritten_task: str = "Filter rows where amount is greater than 1000.",
-    error: Exception | None = None,
-    on_call: Callable[
-        [str, SchemaReport | MultiFileSchemaReport, TaskAdvice | None], None
-    ]
-    | None = None,
-) -> type:
-    class FakeTaskRewriter:
-        TaskRewriteError = FakeRewriteError
-
-        @staticmethod
-        def rewrite_task(
-            original_task: str,
-            schema: SchemaReport | MultiFileSchemaReport,
-            advice: TaskAdvice | None = None,
-            config: object | None = None,
-        ) -> RewrittenTask:
-            if on_call is not None:
-                on_call(original_task, schema, advice)
-            if error is not None:
-                raise error
-            return RewrittenTask(
-                original_task=original_task,
-                rewritten_task=rewritten_task,
-                provider="test-provider",
-                model="test-model",
-            )
-
-    return FakeTaskRewriter
-
-
-def _schema(filename: str = "input.csv") -> SchemaReport:
-    return SchemaReport(
-        filename=filename,
-        file_type="csv",
-        row_count=1,
-        file_size_bytes=20,
-    )
-
-
-def _multi_schema() -> MultiFileSchemaReport:
-    return MultiFileSchemaReport(
-        files=[
-            NamedSchemaReport(name="orders", schema=_schema("orders.csv")),
-            NamedSchemaReport(name="products", schema=_schema("products.csv")),
-        ]
-    )
-
-
-def _button_disabled(
-    calls: list[tuple[str, tuple[object, ...], dict[str, object]]],
-) -> bool:
-    return _button_disabled_by_label(calls, "Generate")
-
-
-def _button_disabled_by_label(
-    calls: list[tuple[str, tuple[object, ...], dict[str, object]]],
-    label: str,
-) -> bool:
-    button_calls = [
-        kwargs
-        for name, args, kwargs in calls
-        if name == "button" and args and args[0] == label
-    ]
-    assert len(button_calls) == 1
-    return bool(button_calls[0].get("disabled", False))
-
-
-def _rendered_text(
-    calls: list[tuple[str, tuple[object, ...], dict[str, object]]],
-) -> str:
-    return "\n".join(
-        str(arg)
-        for _name, args, _kwargs in calls
-        for arg in args
-    )
+def install_streamlit(monkeypatch: pytest.MonkeyPatch, fake: FakeStreamlit) -> None:
+    from snapscript.interfaces import web, web_assistant
+    monkeypatch.setattr(web, "st", fake)
+    monkeypatch.setattr(web_assistant, "st", fake)

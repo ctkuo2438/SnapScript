@@ -1,4 +1,5 @@
 from pathlib import Path
+import pytest
 
 from snapscript.config import AppConfig
 from snapscript.core import prompt_builder
@@ -263,13 +264,13 @@ def test_build_many_escapes_schema_content() -> None:
 
 def test_build_many_truncates_samples_when_budget_is_exceeded(monkeypatch) -> None:
     schema = _multi_schema_report()
-    long_value = "x" * 500
+    long_value = "x" * 5000
     schema.files[0].schema.columns[0].sample_values = [long_value]
     schema.files[0].schema.sample_rows = [{"order_id": long_value}]
     monkeypatch.setattr(
         prompt_builder,
         "AppConfig",
-        lambda: AppConfig(max_prompt_tokens=120),
+        lambda: AppConfig(max_prompt_tokens=2000),
     )
 
     payload = prompt_builder.build_many("Merge files.", schema)
@@ -291,7 +292,7 @@ def test_user_prompt_contains_output_requirement() -> None:
 def test_prompt_truncates_samples_when_budget_is_exceeded(
     monkeypatch,
 ) -> None:
-    long_value = "x" * 500
+    long_value = "x" * 5000
     schema = SchemaReport(
         filename="big.csv",
         file_type="csv",
@@ -309,7 +310,7 @@ def test_prompt_truncates_samples_when_budget_is_exceeded(
     monkeypatch.setattr(
         prompt_builder,
         "AppConfig",
-        lambda: AppConfig(max_prompt_tokens=60),
+        lambda: AppConfig(max_prompt_tokens=1200),
     )
 
     payload = prompt_builder.build("Clean notes.", schema)
@@ -326,3 +327,16 @@ def test_prompt_builder_core_has_no_ui_dependencies() -> None:
     assert "rich" not in source
     assert "streamlit" not in source
     assert "sys.argv" not in source
+
+
+@pytest.mark.parametrize("many", [False, True])
+def test_oversized_schema_is_rejected_without_silently_dropping_columns(many):
+    schema = _schema_report()
+    schema.columns = [ColumnInfo(f"column_{index}_" + "x" * 80, "object") for index in range(400)]
+    schema.sample_rows = []
+    with pytest.raises(ValueError, match="Prompt is too large"):
+        if many:
+            prompt_builder.build_many("Copy rows.", MultiFileSchemaReport([NamedSchemaReport("orders", schema)]))
+        else:
+            prompt_builder.build("Copy rows.", schema)
+    assert len(schema.columns) == 400

@@ -1,183 +1,60 @@
-'''
-pass the PromptPayload to the configured LLM provider, get the response, 
-extract the generated code, validate it, and return a GeneratedScript.
-
-PromptPayload
-  -> Claude API call
-  -> raw response
-  -> cleaned Python code
-  -> GeneratedScript
-
-Streamlit / CLI
--> schema_inspector.inspect(...)
-    -> SchemaReport
--> prompt_builder.build(...)
-    -> PromptPayload(system_prompt, user_prompt)
--> retry_handler.run(...)
-    -> code_generator.generate(...)
-'''
-
+"""Generate complete Python code through the shared provider boundary."""
 from __future__ import annotations
 
 import ast
 import re
-from typing import Any
-
-from anthropic import Anthropic
 
 from snapscript.config import AppConfig
+from snapscript.core import provider
 from snapscript.core.models import GeneratedScript, PromptPayload
+# Retain the existing public error imports for callers of this module.
+from snapscript.core.provider import (
+    CodeGenerationError, EmptyProviderResponseError, ProviderCallError, UnsupportedProviderError,
+)
 
-class CodeGenerationError(Exception):
-    """Base error for code generation failures."""
-
-class UnsupportedProviderError(CodeGenerationError):
-    """Raised when the configured provider is not implemented."""
-
-class ProviderCallError(CodeGenerationError):
-    """Raised when the configured provider call fails."""
-
-class EmptyProviderResponseError(CodeGenerationError):
-    """Raised when the provider returns no usable text."""
 
 class InvalidGeneratedCodeError(CodeGenerationError):
-    """Raised when generated text is not valid Python syntax."""
+    """Raised when generated text is incomplete or invalid Python."""
+
+    def __init__(self, message: str) -> None:
+        super().__init__(message, category="generation_failure")
 
 
-def generate(prompt: PromptPayload, model: str | None = None, config: AppConfig | None = None) -> GeneratedScript:
+def generate(
+    prompt: PromptPayload, model: str | None = None, config: AppConfig | None = None,
+) -> GeneratedScript:
     config = config if config is not None else AppConfig()
-    provider = config.llm_provider.lower()
-    selected_model = model or config.default_model
-
-    if provider != "anthropic":
-        raise UnsupportedProviderError(f"Unsupported LLM provider: {config.llm_provider}")
-
-    # call the llm provider with the system and user prompts, get the raw response object
-    response = _call_provider(prompt, selected_model, config)
-    raw_response = _extract_text(response) # string
-    code = _clean_python_code(raw_response)
-    # validate that the extracted code is valid Python syntax, without executing it
-    _validate_python(code)
-
+    response = provider.call(prompt, model or config.default_model, config)
+    try:
+        if response.stop_reason == "max_tokens":
+            raise InvalidGeneratedCodeError("Provider response was truncated before completion")
+        code = _clean_python_code(response.text)
+        _validate_python(code)
+    except CodeGenerationError as exc:
+        exc.api_calls = [response.metrics]
+        exc.response_text = response.text
+        raise
     return GeneratedScript(
-        code=code,
-        raw_response=raw_response,
-        model=selected_model,
-        input_tokens=_usage_value(response, "input_tokens"),
-        output_tokens=_usage_value(response, "output_tokens"),
+        code=code, raw_response=response.text, model=response.metrics.model,
+        input_tokens=response.metrics.input_tokens or 0,
+        output_tokens=response.metrics.output_tokens or 0,
+        api_call=response.metrics,
     )
 
 
-# call the LLM provider with the system and user prompts, return the raw response object
-def _call_provider(prompt: PromptPayload, model: str, config: AppConfig) -> Any:
-    try:
-        client = Anthropic()
-        request_kwargs: dict[str, Any] = {
-            "model": model,
-            "max_tokens": config.max_tokens,
-            "system": prompt.system_prompt,
-            "messages": [{"role": "user", "content": prompt.user_prompt}],
-        }
-        if config.temperature is not None:
-            request_kwargs["temperature"] = config.temperature
-        return client.messages.create(**request_kwargs)
-    except Exception as exc:
-        raise ProviderCallError("Provider call failed") from exc
-
-
-# extract the text content from the provider response, Anthropic response's content is a list of blocks
-#   we concatenate the text from all blocks to get the full response text
-def _extract_text(response: Any) -> str:
-    parts: list[str] = []
-    for block in getattr(response, "content", []) or []:
-        text = getattr(block, "text", None)
-        if isinstance(text, str):
-            parts.append(text)
-
-    raw_response = "\n".join(parts).strip()
-    if not raw_response:
-        raise EmptyProviderResponseError("Provider returned an empty response")
-    return raw_response
-
-
-# clean the raw response to extract just the Python code, removing any leading or trailing prose, and any code fencing
 def _clean_python_code(raw_response: str) -> str:
-    fenced = _extract_fenced_code(raw_response)
-    candidate = fenced if fenced is not None else raw_response
-    lines = candidate.strip().splitlines() # split into lines for further processing
-    lines = _drop_leading_prose(lines)
-    lines = _drop_trailing_prose(lines)
-    code = "\n".join(lines).strip()
+    match = re.search(
+        r"```(?:python|py)?\s*(.*?)```", raw_response,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    code = (match.group(1) if match else raw_response).strip()
     if not code:
         raise EmptyProviderResponseError("Provider returned no Python code")
     return code
 
 
-# extract the first fenced code block from the response, ```python ... ``` code fence
-def _extract_fenced_code(raw_response: str) -> str | None:
-    match = re.search(
-        r"```(?:python|py)?\s*(.*?)```",
-        raw_response,
-        flags=re.IGNORECASE | re.DOTALL,
-    )
-    if match is None:
-        return None
-    return match.group(1)
-
-
-# heuristically drop any leading lines that don't look like Python code
-def _drop_leading_prose(lines: list[str]) -> list[str]:
-    for index, line in enumerate(lines):
-        if _looks_like_python_start(line):
-            return lines[index:]
-    return lines
-
-
-# heuristically drop any trailing lines that don't look like Python code,
-#   by checking from the end of the lines backwards and looking for the last point 
-#   where the code is still valid Python
-def _drop_trailing_prose(lines: list[str]) -> list[str]:
-    for index in range(len(lines), 0, -1):
-        candidate = "\n".join(lines[:index]).strip()
-        if not candidate:
-            continue
-        try:
-            ast.parse(candidate)
-        except SyntaxError:
-            continue
-        return lines[:index]
-    return lines
-
-
-# heuristically determine if a line looks like the start of Python code,
-#   by checking for common Python keywords and syntax patterns
-'''
-Ex: 
-    Here is the pandas script: # remove this leading prose
-    from _snapscript_paths import INPUT_PATH, OUTPUT_PATH
-    import pandas as pd
-'''
-def _looks_like_python_start(line: str) -> bool:
-    stripped = line.strip()
-    return (
-        stripped.startswith(("from ", "import ", "def ", "class ", "if ", "for "))
-        or stripped.startswith(("while ", "try:", "with ", "print("))
-        or "=" in stripped
-    )
-
-
-# use ast.parse to check if the code is valid Python syntax, without executing it
 def _validate_python(code: str) -> None:
     try:
         ast.parse(code)
-    except SyntaxError as exc:
-        raise InvalidGeneratedCodeError("Generated code is not valid Python") from exc
-
-
-# Anthropic response has a usage attribute with input_tokens and output_tokens fields
-def _usage_value(response: Any, field_name: str) -> int:
-    usage = getattr(response, "usage", None)
-    value = getattr(usage, field_name, 0)
-    if isinstance(value, int):
-        return value
-    return 0
+    except SyntaxError:
+        raise InvalidGeneratedCodeError("Generated code is not valid Python") from None

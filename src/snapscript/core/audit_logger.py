@@ -8,6 +8,7 @@ from pathlib import Path
 import re
 import uuid
 
+from snapscript.core.models import ErrorCategory
 
 DEFAULT_AUDIT_LOG_PATH = Path("logs/snapscript_audit.jsonl")
 AUDIT_INCLUDE_PROMPTS_ENV = "SNAPSCRIPT_AUDIT_INCLUDE_PROMPTS"
@@ -90,7 +91,7 @@ def build_audit_event(
     prompt_text: str | None = None,
     output_file_name: str | None = None,
     output_file_bytes: bytes | None = None,
-    error_category: str | None = None,
+    error_category: ErrorCategory | None = None,
     include_debug: bool | None = None,
     system_prompt: str | None = None,
     user_prompt: str | None = None,
@@ -116,7 +117,7 @@ def build_audit_event(
         ),
         "task_text_sha256": sha256_text(task_text) if task_text else None,
         "schema_summary_sha256": (
-            _sha256_json(schema_summary) if schema_summary is not None else None
+            sha256_json(schema_summary) if schema_summary is not None else None
         ),
         "prompt_sha256": sha256_text(prompt_text) if prompt_text else None,
         "output_file_name": output_file_name,
@@ -171,7 +172,7 @@ def _utc_timestamp() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _sha256_json(value: object) -> str:
+def sha256_json(value: object) -> str:
     safe_value = safe_json_value(value)
     serialized = json.dumps(safe_value, sort_keys=True)
     return sha256_text(serialized)

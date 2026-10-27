@@ -2,6 +2,7 @@
 
 import json
 import os
+import subprocess
 import sys
 from dataclasses import replace
 from unittest.mock import Mock
@@ -12,7 +13,7 @@ from mcp import Client
 from mcp.client.stdio import StdioServerParameters
 
 from snapscript.config import AppConfig
-from snapscript.core import code_generator, docker_sandbox_executor, sandbox_executor
+from snapscript.core import _docker_runtime, code_generator, docker_sandbox_executor, sandbox_executor
 from snapscript.core.models import ExecutionResult, GeneratedScript
 from snapscript.interfaces.mcp_server import create_server
 
@@ -37,7 +38,7 @@ def server(tmp_path):
     # Even an explicit subprocess/network-enabled config cannot relax MCP.
     return create_server(tmp_path, AppConfig(
         sandbox_backend="subprocess", docker_network_disabled=False,
-        docker_timeout_seconds=90, max_retries=0,
+        docker_timeout_seconds=30, max_retries=0,
     ))
 
 
@@ -50,6 +51,7 @@ def generator(monkeypatch):
 
 @pytest.fixture
 def docker_executor(monkeypatch):
+    monkeypatch.setattr(_docker_runtime, "preflight", lambda config: None)
     def execute_locally(code, inputs, output_path, config):
         # Only the backend is replaced; schema/prompt/AST/output checks are real.
         assert config.sandbox_backend == "docker"
@@ -326,3 +328,41 @@ async def test_docker_failure_has_no_output_or_subprocess_fallback(tmp_path, fil
     result = await call(server, "transform_files", {"files": files, "task": "Merge", "output_path": "result.csv"})
     assert result.is_error and "Docker unavailable" in result.content[0].text
     assert result.structured_content is None and not (tmp_path / "result.csv").exists()
+
+
+async def test_unavailable_docker_returns_error_without_generation(tmp_path, files, server, generator, monkeypatch):
+    control = Mock(return_value=subprocess.CompletedProcess([], 1, "", "private-control-fixture"))
+    monkeypatch.setattr(_docker_runtime, "run_process", control)
+    result = await call(server, "transform_files", {
+        "files": files, "task": "Copy rows", "output_path": "result.csv",
+    })
+    assert result.is_error
+    assert "Docker daemon is unavailable" in result.content[0].text
+    assert "private-control-fixture" not in result.content[0].text
+    assert result.structured_content is None
+    assert not (tmp_path / "result.csv").exists()
+    assert generator.call_count == 0
+
+
+async def test_named_single_input_retry_keeps_dictionary_contract(tmp_path, files, generator, docker_executor):
+    server = create_server(tmp_path, AppConfig(max_retries=1))
+    files = {"orders": files["orders"]}
+    before = (tmp_path / "orders.csv").read_bytes()
+    code = '''from _snapscript_paths import INPUT_PATHS, OUTPUT_PATH
+import pandas as pd
+orders = pd.read_csv(INPUT_PATHS["orders"])
+pd.DataFrame({"amount": [orders["amount"].sum()]}).to_csv(OUTPUT_PATH, index=False)
+'''
+    generator.side_effect = [
+        GeneratedScript("raise ValueError('synthetic failure')", "", "fixture"),
+        GeneratedScript(code, code, "fixture"),
+    ]
+    result = await call(server, "transform_files", {
+        "files": files, "task": "Sum amount", "output_path": "result.csv",
+    })
+    assert not result.is_error, result.content
+    pd.testing.assert_frame_equal(pd.read_csv(tmp_path / "result.csv"), pd.DataFrame({"amount": [600]}))
+    context = generator.call_args.args[0].user_prompt.split("## Retry context\n", 1)[1]
+    assert "Read input only from INPUT_PATH." not in context
+    assert generator.call_count == docker_executor.call_count == 2
+    assert (tmp_path / "orders.csv").read_bytes() == before

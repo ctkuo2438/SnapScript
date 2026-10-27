@@ -106,7 +106,7 @@ def test_execute_returns_failure_when_output_is_unreadable(tmp_path: Path) -> No
 from _snapscript_paths import OUTPUT_PATH
 
 with open(OUTPUT_PATH, "wb") as file:
-    file.write(b"\\xff\\xfe\\x00not-a-valid-csv")
+    file.write(b"\\xff\\xfe\\x00")
 """
 
     result = sandbox_executor.execute(code, input_path, output_path)
@@ -316,8 +316,8 @@ paths = {name: Path(path) for name, path in INPUT_PATHS.items()}
 assert INPUT_PATH is None
 assert set(paths) == {"orders", "products"}
 assert paths["orders"].name != paths["products"].name
-assert paths["orders"].name.startswith("input_0_orders_")
-assert paths["products"].name.startswith("input_1_products_")
+assert paths["orders"].name == "input_0.csv"
+assert paths["products"].name == "input_1.csv"
 assert all(path.parent.resolve() == Path.cwd().resolve() for path in paths.values())
 assert ".." not in paths["orders"].name
 pd.DataFrame(

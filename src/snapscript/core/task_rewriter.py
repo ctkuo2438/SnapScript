@@ -6,28 +6,29 @@ from __future__ import annotations
 
 from pathlib import Path
 import re
-from typing import Any
 
-from anthropic import Anthropic
-
+from snapscript.core import provider
+from snapscript.core._prompt_data import serialize_prompt_data
 from snapscript.config import AppConfig
 from snapscript.core.models import (
     MultiFileSchemaReport,
+    ErrorCategory,
     RewrittenTask,
     SchemaReport,
     TaskAdvice,
+    PromptPayload,
+    ProviderReply,
 )
 
 
 PROMPT_PATH = Path(__file__).resolve().parents[1] / "prompts" / "task_rewrite.txt"
 CODE_PATTERNS = (
     r"```",
-    r"\bimport\s+\w+",
-    r"\bfrom\s+\w+\s+import\b",
-    r"\bdef\s+\w+\s*\(",
-    r"\bclass\s+\w+",
-    r"\bpd\.",
-    r"\bpandas\b",
+    r"(?m)^\s*import\s+[\w.]+(?:\s+as\s+\w+)?(?:\s*,\s*[\w.]+(?:\s+as\s+\w+)?)*\s*(?:;|$)",
+    r"(?m)^\s*from\s+[\w.]+\s+import\s+(?:\w+|\*)",
+    r"(?m)^\s*(?:async\s+)?def\s+\w+\s*\(",
+    r"(?m)^\s*class\s+\w+(?:\([^)]*\))?\s*:",
+    r"\b(?:pd|pandas)\.\w+\s*\(",
     r"\bread_csv\s*\(",
     r"\bread_excel\s*\(",
     r"\bto_csv\s*\(",
@@ -35,8 +36,9 @@ CODE_PATTERNS = (
     r"\bINPUT_PATHS?\b",
     r"\bOUTPUT_PATH\b",
 )
+_PATH_START = r"(?:~[\w.-]*[/\\]|/(?!/)|[A-Za-z]:[/\\]|\\\\)"
 REAL_PATH_PATTERN = re.compile(
-    r"(?:/(?:private/)?(?:tmp|var|Users|home)/[^\s,;]+|[A-Za-z]:\\[^\s,;]+)"
+    rf'''(?<![\w/\\<])(?:["']{_PATH_START}[^"'\r\n]+["']|{_PATH_START}[^\s,;'"<>]+)'''
 )
 FILE_NAME_PATTERN = re.compile(
     r"\b[^\s/\\]+\.(?:csv|xlsx)\b",
@@ -44,7 +46,12 @@ FILE_NAME_PATTERN = re.compile(
 )
 
 class TaskRewriteError(Exception):
-    """Raised when task rewriting fails safely."""
+    """Safe failure with a category and optional provider metadata."""
+
+    def __init__(self, message: str, *, category: ErrorCategory = "provider_failure") -> None:
+        super().__init__(message)
+        self.category = category
+        self.api_calls = []
 
 
 def rewrite_task(
@@ -59,7 +66,7 @@ def rewrite_task(
     user_prompt = _build_rewrite_user_prompt(original_task, schema, advice)
 
     try:
-        raw_text, provider, selected_model = _call_provider(
+        response = _call_provider(
             system_prompt,
             user_prompt,
             model,
@@ -70,13 +77,18 @@ def rewrite_task(
     except Exception:
         raise TaskRewriteError("Task rewrite provider call failed") from None
 
-    rewritten = _strip_rewrite_output(raw_text)
-    _validate_rewritten_task(rewritten)
+    rewritten = _strip_rewrite_output(response.text)
+    try:
+        _validate_rewritten_task(rewritten)
+    except TaskRewriteError as exc:
+        exc.api_calls = [response.metrics]
+        raise
     return RewrittenTask(
         original_task=original_task,
         rewritten_task=rewritten,
-        provider=provider,
-        model=selected_model,
+        provider=response.metrics.provider,
+        model=response.metrics.model,
+        api_call=response.metrics,
     )
 
 
@@ -105,7 +117,7 @@ def _build_rewrite_user_prompt(
     parts.extend(
         [
             "<original_task>",
-            _redact_paths_and_filenames(original_task.strip()),
+            serialize_prompt_data(_redact_paths_and_filenames(original_task.strip())),
             "</original_task>",
             "Rewrite the original task. Return only the rewritten task text.",
         ]
@@ -113,69 +125,37 @@ def _build_rewrite_user_prompt(
     return "\n".join(parts)
 
 
-def _schema_summary_for_rewrite(
-    schema: SchemaReport | MultiFileSchemaReport,
-) -> str:
+def _schema_summary_for_rewrite(schema: SchemaReport | MultiFileSchemaReport) -> str:
     if isinstance(schema, MultiFileSchemaReport):
-        return "\n".join(
-            _named_schema_summary(file_schema.name, file_schema.schema)
-            for file_schema in schema.files
-        )
-    if isinstance(schema, SchemaReport):
-        return _single_schema_summary(schema)
-    raise TypeError("schema must be SchemaReport or MultiFileSchemaReport")
+        data = {"files": [
+            {"logical_name": file.name, **_schema_metadata(file.schema)}
+            for file in schema.files
+        ]}
+    elif isinstance(schema, SchemaReport):
+        data = _schema_metadata(schema)
+    else:
+        raise TypeError("schema must be SchemaReport or MultiFileSchemaReport")
+    return serialize_prompt_data(data)
 
 
-def _single_schema_summary(schema: SchemaReport) -> str:
-    lines = [
-        "<file>",
-        f"file_type: {schema.file_type}",
-        f"row_count: {schema.row_count}",
-        "columns:",
-    ]
-    lines.extend(_column_lines(schema))
-    lines.append("</file>")
-    return "\n".join(lines)
-
-
-def _named_schema_summary(name: str, schema: SchemaReport) -> str:
-    lines = [
-        f'<file name="{name}">',
-        f"file_type: {schema.file_type}",
-        f"row_count: {schema.row_count}",
-        "columns:",
-    ]
-    lines.extend(_column_lines(schema))
-    lines.append("</file>")
-    return "\n".join(lines)
-
-
-def _column_lines(schema: SchemaReport) -> list[str]:
-    return [
-        f"- {column.name}: {column.dtype}, null_count={column.null_count}"
-        for column in schema.columns
-    ]
+def _schema_metadata(schema: SchemaReport) -> dict[str, object]:
+    return {
+        "file_type": schema.file_type, "row_count": schema.row_count,
+        "selected_sheet": schema.selected_sheet,
+        "columns": [
+            {"name": column.name, "dtype": column.dtype, "null_count": column.null_count}
+            for column in schema.columns
+        ],
+    }
 
 
 def _advice_summary_for_rewrite(advice: TaskAdvice) -> str:
-    lines = [f"quality: {advice.quality}"]
-    if advice.missing_details:
-        lines.append("missing_details:")
-        lines.extend(
-            f"- {_redact_paths_and_filenames(detail)}"
-            for detail in advice.missing_details
-        )
-    if advice.suggestions:
-        lines.append("suggestions:")
-        lines.extend(
-            f"- {_redact_paths_and_filenames(suggestion)}"
-            for suggestion in advice.suggestions
-        )
-    if advice.suggested_task:
-        lines.append(
-            f"suggested_task: {_redact_paths_and_filenames(advice.suggested_task)}"
-        )
-    return "\n".join(lines)
+    return serialize_prompt_data({
+        "quality": advice.quality,
+        "missing_details": [_redact_paths_and_filenames(detail) for detail in advice.missing_details],
+        "suggestions": [_redact_paths_and_filenames(suggestion) for suggestion in advice.suggestions],
+        "suggested_task": _redact_paths_and_filenames(advice.suggested_task) if advice.suggested_task else None,
+    })
 
 
 def _strip_rewrite_output(text: str) -> str:
@@ -193,61 +173,36 @@ def _strip_rewrite_output(text: str) -> str:
         stripped,
         flags=re.IGNORECASE,
     ).strip()
-    return stripped.strip("\"'")
+    if len(stripped) >= 2 and stripped[0] in "\"'" and stripped[-1] == stripped[0]:
+        return stripped[1:-1].strip()
+    return stripped
 
 
 def _validate_rewritten_task(text: str) -> None:
     if not text.strip():
-        raise TaskRewriteError("Rewritten task is empty")
+        raise TaskRewriteError("Rewritten task is empty", category="rewrite_validation")
     if _looks_like_code(text):
-        raise TaskRewriteError("Rewritten task must be natural language")
+        raise TaskRewriteError("Rewritten task must be natural language", category="rewrite_validation")
     if REAL_PATH_PATTERN.search(text) or FILE_NAME_PATTERN.search(text):
-        raise TaskRewriteError("Rewritten task must not include real file paths")
+        raise TaskRewriteError("Rewritten task must not include real file paths", category="rewrite_validation")
 
 
 def _looks_like_code(text: str) -> bool:
-    return any(re.search(pattern, text, flags=re.IGNORECASE) for pattern in CODE_PATTERNS)
+    return any(re.search(pattern, text) for pattern in CODE_PATTERNS)
 
 
 def _call_provider(
-    system_prompt: str,
-    user_prompt: str,
-    model: str | None,
-    config: AppConfig,
-) -> tuple[str, str, str]:
-    provider = config.llm_provider.lower()
-    selected_model = model or config.default_model
-    if provider != "anthropic":
-        raise TaskRewriteError(
-            f"Unsupported LLM provider: {config.llm_provider}"
-        )
-
+    system_prompt: str, user_prompt: str, model: str | None, config: AppConfig,
+) -> ProviderReply:
     try:
-        client = Anthropic()
-        request_kwargs: dict[str, Any] = {
-            "model": selected_model,
-            "max_tokens": config.max_tokens,
-            "system": system_prompt,
-            "messages": [{"role": "user", "content": user_prompt}],
-        }
-        if config.temperature is not None:
-            request_kwargs["temperature"] = config.temperature
-        response = client.messages.create(**request_kwargs)
-    except Exception:
-        raise TaskRewriteError("Task rewrite provider call failed") from None
-
-    return _extract_text(response), provider, selected_model
+        return provider.call(PromptPayload(system_prompt, user_prompt), model or config.default_model, config)
+    except provider.CodeGenerationError as exc:
+        message = str(exc) if exc.category == "input_validation" else "Task rewrite provider call failed"
+        error = TaskRewriteError(message, category=exc.category)
+        error.api_calls = exc.api_calls
+        raise error from None
 
 
 def _redact_paths_and_filenames(text: str) -> str:
     redacted = REAL_PATH_PATTERN.sub("[path]", text)
     return FILE_NAME_PATTERN.sub("[file]", redacted)
-
-
-def _extract_text(response: Any) -> str:
-    parts: list[str] = []
-    for block in getattr(response, "content", []) or []:
-        text = getattr(block, "text", None)
-        if isinstance(text, str):
-            parts.append(text)
-    return "\n".join(parts).strip()

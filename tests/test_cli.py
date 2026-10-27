@@ -144,7 +144,7 @@ def test_validates_input_before_generation(
 
     assert status == 1
     assert calls == []
-    assert "Input file not found" in capsys.readouterr().err
+    assert "File not found" in capsys.readouterr().err
 
 
 def test_rejects_unsupported_extension_before_generation(
@@ -174,7 +174,7 @@ def test_rejects_unsupported_extension_before_generation(
 
     assert status == 1
     assert calls == []
-    assert "Unsupported input file type" in capsys.readouterr().err
+    assert "Unsupported file type" in capsys.readouterr().err
 
 
 def test_rejects_xls_before_generation(
@@ -204,7 +204,7 @@ def test_rejects_xls_before_generation(
 
     assert status == 1
     assert calls == []
-    assert "Unsupported input file type: .xls" in capsys.readouterr().err
+    assert "Unsupported file type: .xls" in capsys.readouterr().err
 
 
 def test_dry_run_generates_and_checks_but_does_not_execute(
@@ -634,6 +634,49 @@ def test_show_code_prints_generated_code(
     assert generated_code in capsys.readouterr().out
 
 
+@pytest.mark.parametrize("column", ["amount [usd]", "[/x]"])
+def test_cli_preserves_bracketed_column_and_file_names(tmp_path, monkeypatch, capsys, column):
+    from unittest.mock import Mock
+    import pandas as pd
+
+    source = tmp_path / "orders [usd].csv"
+    pd.DataFrame({column: [1]}).to_csv(source, index=False)
+    generator = Mock(return_value=GeneratedScript("print('fixture')", "", "fixture"))
+    monkeypatch.setattr(cli.code_generator, "generate", generator)
+    status = cli.main(["Copy rows", "--file", str(source), "--output", str(tmp_path / "out.csv"), "--dry-run"])
+    captured = capsys.readouterr()
+    assert status == 0
+    assert column in captured.out
+    assert source.name in captured.out
+    assert generator.call_count == 1
+
+
+def test_cli_reports_missing_credentials_without_sdk_request(tmp_path, monkeypatch, capsys):
+    from helpers.provider_helpers import FakeAnthropic
+    from snapscript.core import provider
+
+    source = tmp_path / "input.csv"
+    source.write_text("value\n1\n")
+    client = FakeAnthropic()
+    client.api_key = client.auth_token = None
+    monkeypatch.setattr(provider, "Anthropic", lambda **kwargs: client)
+    status = cli.main(["Copy rows", "--file", str(source), "--output", str(tmp_path / "out.csv"), "--dry-run"])
+    assert status == 1
+    assert "ANTHROPIC_API_KEY" in capsys.readouterr().err
+    assert client.messages.calls == []
+
+
+@pytest.mark.parametrize("arguments", [["--api-key", "fixture-secret"], ["--api-key=fixture-secret"]])
+def test_removed_api_key_option_never_echoes_its_value(arguments, capsys):
+    assert "--api-key" not in cli.build_parser().format_help()
+    with pytest.raises(SystemExit) as captured:
+        cli.main(arguments)
+    assert captured.value.code == 2
+    output = capsys.readouterr()
+    assert "fixture-secret" not in output.out + output.err
+    assert "ANTHROPIC_API_KEY" in output.err
+
+
 def test_api_key_is_not_printed(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -643,6 +686,7 @@ def test_api_key_is_not_printed(
     input_path.write_text("order_id,amount\n1,10\n")
     calls: list[str] = []
     _patch_pipeline(monkeypatch, calls)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "secret-api-key")
 
     status = cli.main(
         [
@@ -652,8 +696,6 @@ def test_api_key_is_not_printed(
             "--output",
             str(tmp_path / "out.csv"),
             "--dry-run",
-            "--api-key",
-            "secret-api-key",
             "--verbose",
         ]
     )
@@ -674,6 +716,7 @@ def test_api_key_is_redacted_from_errors(
     input_path.write_text("order_id,amount\n1,10\n")
     calls: list[str] = []
     _patch_pipeline(monkeypatch, calls)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "secret-api-key")
 
     def fail_retry(
         prompt: PromptPayload,
@@ -694,8 +737,6 @@ def test_api_key_is_redacted_from_errors(
             "--output",
             str(tmp_path / "out.csv"),
             "--yes",
-            "--api-key",
-            "secret-api-key",
         ]
     )
 
@@ -703,7 +744,7 @@ def test_api_key_is_redacted_from_errors(
     assert status == 1
     assert "secret-api-key" not in captured.out
     assert "secret-api-key" not in captured.err
-    assert "[redacted]" in captured.err
+    assert "[redacted]" in captured.err.lower()
 
 
 def test_safety_failure_stops_before_execution(
@@ -721,6 +762,7 @@ def test_safety_failure_stops_before_execution(
             success=False,
             stderr="Safety violation: Blocked unsafe import: os",
             exit_code=1,
+            error_category="safety_violation",
         ),
     )
 

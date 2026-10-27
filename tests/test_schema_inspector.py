@@ -329,3 +329,38 @@ def test_schema_inspector_core_has_no_ui_dependencies() -> None:
     assert "rich" not in source
     assert "streamlit" not in source
     assert "sys.argv" not in source
+
+
+@pytest.mark.parametrize("sheet,rows", [("Orders", 0), ("Orders", 2), ("Products", 3)])
+def test_xlsx_without_dimensions_counts_selected_sheet(tmp_path, sheet, rows):
+    from io import BytesIO
+    from zipfile import ZipFile
+    import xml.etree.ElementTree as ET
+    from openpyxl import Workbook
+
+    workbook = Workbook()
+    workbook.active.title = "Orders"
+    workbook.create_sheet("Products")
+    for name in workbook.sheetnames:
+        worksheet = workbook[name]
+        worksheet.append(["amount"])
+        count = rows if name == sheet else 1
+        for number in range(count):
+            worksheet.append([number + 1])
+    buffer = BytesIO()
+    workbook.save(buffer)
+    workbook.close()
+    path = tmp_path / "no-dimensions.xlsx"
+    with ZipFile(buffer) as original, ZipFile(path, "w") as target:
+        for entry in original.infolist():
+            data = original.read(entry.filename)
+            if entry.filename.startswith("xl/worksheets/") and entry.filename.endswith(".xml"):
+                element = ET.fromstring(data)
+                dimension = element.find("{http://schemas.openxmlformats.org/spreadsheetml/2006/main}dimension")
+                element.remove(dimension)
+                data = ET.tostring(element)
+            target.writestr(entry, data)
+    report = schema_inspector.inspect(path, sheet=sheet)
+    assert report.row_count == rows
+    assert report.selected_sheet == sheet
+    assert [column.name for column in report.columns] == ["amount"]

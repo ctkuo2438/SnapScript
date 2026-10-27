@@ -13,8 +13,8 @@ from mcp.types import ToolAnnotations
 
 from snapscript.config import AppConfig
 from snapscript.core import prompt_builder, retry_handler, schema_inspector
-from snapscript.core.audit_logger import redact_secret_values
 from snapscript.core.models import InputFileSpec, NamedSchemaReport
+from snapscript.interfaces.errors import safe_error_text
 
 
 MAX_SCHEMA_COLUMNS = 100
@@ -55,7 +55,7 @@ class _Tools:
         )
         self.config = replace(
             selected, sandbox_backend="docker", docker_network_disabled=True,
-            docker_timeout_seconds=min(selected.docker_timeout_seconds, 30),
+            overwrite_output=False,
         )
 
     def inspect_file_schema(self, files: dict[str, str]) -> dict[str, Any]:
@@ -150,10 +150,7 @@ def _schema_metadata(item: NamedSchemaReport) -> dict[str, Any]:
 
 
 def _tool_error(message: str) -> ToolError:
-    if "Traceback (most recent call last):" in message:
-        message = message.strip().splitlines()[-1]
-    safe_message = redact_secret_values(message.strip() or "SnapScript operation failed")
-    return ToolError(safe_message[:MAX_ERROR_CHARS])
+    return ToolError(safe_error_text(message or "SnapScript operation failed", MAX_ERROR_CHARS))
 
 
 def main() -> None:

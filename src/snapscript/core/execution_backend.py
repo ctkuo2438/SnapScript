@@ -1,53 +1,27 @@
-'''Route generated code execution to the configured sandbox backend.'''
-
-from __future__ import annotations
+"""Route execution to one of the two existing sandbox backends."""
 
 from pathlib import Path
 
 from snapscript.config import AppConfig
-from snapscript.core import docker_sandbox_executor, sandbox_executor
+from snapscript.core import _docker_runtime, docker_sandbox_executor, sandbox_executor
 from snapscript.core.models import ExecutionResult, InputFileSpec
 
 
+def preflight(config: AppConfig) -> ExecutionResult | None:
+    if config.sandbox_backend == "docker":
+        return _docker_runtime.preflight(config)
+    return None
+
+
 def execute(
-    code: str, # LLM-generated code to execute
-    input_path: Path | list[InputFileSpec], # input CSV/Excel file path or named input files
-    output_path: Path, # output CSV/Excel file path
+    code: str, input_path: Path | list[InputFileSpec], output_path: Path,
     config: AppConfig | None = None,
 ) -> ExecutionResult:
-    
-    # determine which sandbox backend to use based on config, default to subprocess if not specified
-    #   default is subprocess, can be switched to docker via SNAPSCRIPT_SANDBOX_BACKEND=docker
-    selected_config = config if config is not None else AppConfig()
-    backend = str(getattr(selected_config, "sandbox_backend", "")).strip().lower()
-
-    if backend == "subprocess":
-        if isinstance(input_path, list):
-            return sandbox_executor.execute_many(
-                code,
-                input_path,
-                output_path,
-                config=selected_config,
-            )
-        return sandbox_executor.execute(
-            code,
-            input_path,
-            output_path,
-            config=selected_config,
-        )
-    if backend == "docker":
-        if isinstance(input_path, list):
-            return docker_sandbox_executor.execute_many(
-                code,
-                input_path,
-                output_path,
-                config=selected_config,
-            )
-        return docker_sandbox_executor.execute(
-            code,
-            input_path,
-            output_path,
-            config=selected_config,
-        )
-
-    raise ValueError(f"Unsupported sandbox backend: {backend}")
+    selected = config or AppConfig()
+    backends = {"subprocess": sandbox_executor, "docker": docker_sandbox_executor}
+    backend = backends.get(str(selected.sandbox_backend).strip().lower())
+    if backend is None:
+        raise ValueError(f"Unsupported sandbox backend: {selected.sandbox_backend}")
+    if isinstance(input_path, list):
+        return backend.execute_many(code, input_path, output_path, config=selected)
+    return backend.execute(code, input_path, output_path, config=selected)

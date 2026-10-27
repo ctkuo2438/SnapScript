@@ -1,181 +1,49 @@
 ---
 name: snapscript-safety-rules
-description: |
-  Use when writing or modifying code in SnapScript that touches code generation,
-  AST analysis, sandbox execution, or path injection. Triggers include working
-  on safety_checker.py, sandbox_executor.py, prompt_builder.py system prompts,
-  or tests under tests/test_safety_checker.py. Do NOT use for general Python
-  coding outside SnapScript's safety perimeter.
+description: Use for SnapScript generation, prompts, AST checks, path injection, sandbox execution, and safety tests.
 ---
 
-# SnapScript safety rules
+# Execution safety
 
-This skill reflects decisions in TODOS.md section "Architecture decisions".
-Those decisions OVERRIDE older drafts in snapscript-sds.md where they conflict.
+Follow `AGENTS.md`. Consult local-only `specs/csv-merge.md`, `specs/mcp.md` and
+`docs/docker_sandbox.md` when available; otherwise use the user's requirements
+and source/tests to establish the relevant contracts.
 
-## Two layers of defense — never collapse to one
-
-safety_checker (AST scan) is the first line of defense.
-sandbox_executor (process isolation) is the second line of defense.
-
-Both must exist. safety_checker alone is bypassable via dynamic strings
-(string concatenation, getattr lookup). sandbox_executor alone wastes API
-tokens generating code that should be rejected at parse time.
-
-## PATH injection: _snapscript_paths.py (NOT str.replace)
-
-Per TODOS.md decision: sandbox_executor writes _snapscript_paths.py to the
-tempdir. Generated scripts import paths from it.
-
-The generated script does this:
-
-    from _snapscript_paths import INPUT_PATH, OUTPUT_PATH
-
-sandbox_executor writes tempdir/_snapscript_paths.py with content like:
-
-    INPUT_PATH = "/abs/path/to/copied_input.csv"
-    OUTPUT_PATH = "/abs/path/to/output.csv"
-
-DO NOT use code.replace("INPUT_PATH", actual_path). It is brittle (matches
-inside string literals and comments) and is an explicit anti-pattern in
-this project.
-
-## open() is ALLOWED — but constrained
-
-Earlier draft had open in BLOCKED_CALLS. This was changed.
-
-Allowed usage:
-- open("relative_name.txt") — relative path is OK
-- open(OUTPUT_PATH, "w") — injected path is OK
-- open(some_variable) — dynamic argument; AST allows, sandbox contains
-
-AST blocks (literal string argument matching):
-- open("/etc/passwd") — absolute path
-- open("../../secret") — path traversal
-- open("C:\\Windows\\System32\\foo") — absolute Windows path
-
-The check: AST visits Call(func=Name(id="open")). If args[0] is a
-Constant(str), validate the string. Dynamic arguments fall through to the
-sandbox path containment.
-
-## Blocked imports
-
-Block these at AST parse time:
-
-    BLOCKED_IMPORTS = {
-        "os", "sys", "subprocess", "shutil",
-        "socket", "http", "urllib", "requests", "ftplib", "smtplib",
-        "pickle", "shelve",
-        "ctypes", "importlib",
-        "code", "codeop",
-    }
-
-compile and compileall are functions, not imports — they are covered under
-BLOCKED_CALLS below.
-
-## Blocked function calls
-
-    BLOCKED_CALLS = {
-        "exec", "eval", "compile", "__import__",
-        "globals", "locals",
-        "getattr", "setattr", "delattr",
-    }
-
-NOTE: open is NOT in BLOCKED_CALLS — see "open() is ALLOWED" above.
-
-## Allowed imports (whitelist per AppConfig)
-
-    ALLOWED_IMPORTS = frozenset({
-        "pandas", "pd",
-        "openpyxl",
-        "csv", "json", "re", "datetime", "pathlib",
-        "collections", "itertools", "functools",
-        "math", "decimal",
-        "typing",
-    })
-
-When adding a new allowed import, justify in the PR description WHY a
-malicious script cannot abuse it. Default answer is NO.
-
-## Prompt-injection defense (schema in <schema> delimiters)
-
-Per TODOS.md: prompt_builder MUST wrap schema in delimiters so an attacker
-naming a column "\nIgnore previous instructions..." cannot escape:
-
-    user_prompt = f"""
-    ## Input file information
-    <schema>
-    {rendered_schema}
-    </schema>
-
-    ## Task description
-    {user_task_description}
-    """
-
-Plus: column names truncated to 100 chars in schema_inspector before they
-reach the prompt.
-
-## Output validation (post-execution)
-
-Per TODOS.md: sandbox_executor MUST read the first row of the output file
-after subprocess.run returns. Empty or unreadable output means
-ExecutionResult(success=False).
-
-At end of sandbox_executor.execute():
-
-    try:
-        if output_path.exists():
-            if output_path.suffix == ".csv":
-                pd.read_csv(output_path, nrows=1)
-            elif output_path.suffix in (".xlsx", ".xls"):
-                pd.read_excel(output_path, nrows=1)
-        else:
-            return ExecutionResult(success=False, ...)
-    except Exception as e:
-        return ExecutionResult(
-            success=False,
-            stderr=f"Output unreadable: {e}",
-            ...
-        )
-
-A script that ran cleanly but produced nothing is a FAILURE.
-
-## When writing tests for safety_checker
-
-Cover BOTH directions in tests/test_safety_checker.py.
-
-Positive tests (block known-bad):
-- import os, import subprocess
-- __import__("os"), __import__("o" + "s")
-- exec(user_input), eval("...")
-- getattr(__builtins__, "exec")(code)
-- open("/etc/passwd"), open("../../secret")
-
-Negative tests (allow legitimate):
-- import pandas as pd
-- pd.read_csv(INPUT_PATH)
-- df.to_csv(OUTPUT_PATH, index=False)
-- open("relative.txt", "w")
-- Long pandas chains shouldn't false-positive
-
-Use tests/fixtures/malicious_code.py as the registry of known-bad patterns.
-
-## Privacy: never log file content
-
-NEVER:
-- logger.info(f"Processing {df.head()}")
-- logger.info(f"Prompt: {full_prompt}")
-- logger.info(f"Generated: {code}")
-
-OK:
-- logger.info(f"File: name={filename}, rows={n}, cols={k}")
-- logger.info(f"API: model={m}, in={ti}, out={to}, ms={lat}")
-- logger.info(f"Generated {len(code)} chars")
-
-## When tempted to weaken a check
-
-False positives mean the user rephrases their task — recoverable.
-False negatives mean a compromised machine — NOT recoverable.
-
-If a check feels too strict, the right move is usually to add a narrow
-whitelist for the specific legitimate pattern, not weaken the general rule.
+- Always run the AST safety scan before generated code executes.
+- AST checks reject known unsafe syntax; they cannot prove arbitrary Python safe.
+  Docker is the execution isolation boundary. Block dangerous builtin references,
+  dunder/module attributes, and unsafe literal I/O paths/URLs. Dynamic paths and
+  arbitrary callable aliases are not resolved by this scan.
+- Keep import restrictions separate from column attributes. Allow `__name__`,
+  ordinary `code`/`requests`/`http` columns and URL strings used as data. Block
+  known URL openers, home expansion calls and unsafe literal `joinpath` parts.
+- Inject paths through `_snapscript_paths.py`: single-file `INPUT_PATH`,
+  multi-file `INPUT_PATHS`, and `OUTPUT_PATH`. Never substitute user paths into
+  generated source or prompts.
+- `open()`, pathlib constructors and pandas I/O remain allowed with safe injected
+  paths. Check literal path arguments and path keywords; keep harmless pandas
+  conversions and non-path format/delimiter arguments working.
+- Subprocess execution is a compatibility backend, not host filesystem isolation.
+  Pass only required environment variables, never provider/cloud credentials.
+  MCP execution requires Docker. Streamlit defaults to Docker; subprocess there
+  needs an explicit opt-in and a visible warning.
+- Docker mounts only the per-run workspace, never repo/home/socket; preserve
+  network-disabled mode, non-root execution, resource limits,
+  the 30-second ceiling, and bounded timeout/capture cleanup.
+- Apply `seccomp=builtin` to every container and verify `Seccomp: 2` in bounded
+  preflight without host mounts before generation. A daemon default of unconfined
+  is acceptable only when the explicit override actually installs a filter.
+  Reject unsupported filtering; do not alter host Docker settings automatically.
+- Validate Docker timeouts (1–30 seconds) in config. Keep committed outputs 0600.
+- Retain capability removal, no-new-privileges, read-only root and the bounded
+  `/tmp` tmpfs. Map the caller to a non-root UID/GID; keep workspace directories
+  0700 and copied files 0600. Root callers keep a root-owned private parent around
+  the nested workspace; never chmod a host workspace world-writable.
+- Keep process captures bounded. Reject symlink/non-file, empty, oversized, or
+  unreadable outputs before committing. Parse the first output row.
+- Keep source bytes intact. Guard aliases and publish a complete staged output
+  atomically; MCP must reject an existing destination even if created mid-run.
+- Reject truncated or syntactically invalid generated responses whole.
+- Escape untrusted schema metadata inside prompt delimiters.
+- Never log datasets, full prompts, generated code, environment values, keys, or
+  full tracebacks by default. Tests must check legitimate code and known attacks.

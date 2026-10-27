@@ -191,3 +191,34 @@ def test_build_audit_event_debug_env_var_enables_debug_fields(
     )
 
     assert event["task_text"] == "Keep large orders."
+
+
+def test_redact_error_text_redacts_anthropic_api_key() -> None:
+    redacted = audit_logger.redact_secret_values(
+        "Authorization failed for Bearer sk-ant-api03-exampleSecret123"
+    )
+
+    assert "sk-ant" not in redacted
+    assert redacted == "Authorization failed for Bearer [REDACTED]"
+
+
+def test_redact_error_text_redacts_environment_assignment() -> None:
+    redacted = audit_logger.redact_secret_values(
+        "ANTHROPIC_API_KEY=sk-ant-api03-exampleSecret123"
+    )
+
+    assert redacted == "ANTHROPIC_API_KEY=[REDACTED]"
+    assert "sk-ant" not in redacted
+
+
+def test_redact_error_text_redacts_secret_like_values() -> None:
+    redacted = audit_logger.redact_secret_values(
+        "password=my-password token=abc123 secret=top-secret"
+    )
+
+    assert redacted == (
+        "password=[REDACTED] token=[REDACTED] secret=[REDACTED]"
+    )
+    assert "my-password" not in redacted
+    assert "abc123" not in redacted
+    assert "top-secret" not in redacted

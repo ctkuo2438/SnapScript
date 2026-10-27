@@ -1,7 +1,11 @@
+from unittest.mock import Mock
+
 import pandas as pd
 import pytest
 
-from snapscript.core import execution_backend
+from snapscript.config import AppConfig
+from snapscript.core import code_generator, execution_backend, retry_handler
+from snapscript.core.models import GeneratedScript, PromptPayload
 from merge_helpers import expected_merge, merge_code, run_mocked_merge, write_inputs
 
 
@@ -62,13 +66,37 @@ def test_no_matching_rows_returns_empty_output_error(tmp_path, monkeypatch):
     assert not output.exists()
 
 
-def test_unsafe_merge_code_never_reaches_a_backend(tmp_path, monkeypatch):
+@pytest.mark.parametrize("backend", ["subprocess", "docker"])
+@pytest.mark.parametrize("many", [False, True])
+@pytest.mark.parametrize("code", [
+    pytest.param("import os\nos.system('id')", id="blocked-import"),
+    pytest.param("callback = eval", id="builtin-alias"),
+    pytest.param("().__class__.__base__.__subclasses__()", id="dunder-chain"),
+    pytest.param("import pandas as pd\npd.io.common.os.system('true')", id="pandas-module"),
+    pytest.param("import pandas as pd\npd.read_csv('/etc/passwd')", id="pandas-path"),
+    pytest.param("from pathlib import Path\nPath('/etc/passwd').open()", id="path-open"),
+])
+def test_unsafe_merge_code_never_reaches_a_backend(tmp_path, monkeypatch, backend, many, code):
     def unexpected_execute(*args, **kwargs):
         pytest.fail("Unsafe code must not reach any execution backend")
 
+    inputs = write_inputs(tmp_path)
+    originals = [spec.path.read_bytes() for spec in inputs]
+    output = tmp_path / "merged.csv"
+    generator = Mock(return_value=GeneratedScript(code, code, "fixture"))
+    monkeypatch.setattr(code_generator, "generate", generator)
     monkeypatch.setattr(execution_backend, "execute", unexpected_execute)
-    result, calls = run_mocked_merge(write_inputs(tmp_path), tmp_path / "merged.csv", "Merge files.", "import os\nos.system('id')", monkeypatch)
+    monkeypatch.setattr(execution_backend, "preflight", lambda config: None)
+    run = retry_handler.run_many if many else retry_handler.run
+    result = run(
+        PromptPayload("system", "Process input rows."),
+        inputs if many else inputs[0].path, output,
+        config=AppConfig(sandbox_backend=backend),
+    )
 
     assert not result.success
+    assert result.error_category == "safety_violation"
     assert "Safety violation" in result.stderr
-    assert len(calls) == 1
+    assert generator.call_count == 1
+    assert not output.exists()
+    assert [spec.path.read_bytes() for spec in inputs] == originals

@@ -2,6 +2,8 @@ from copy import deepcopy
 import os
 from pathlib import Path
 
+import pytest
+
 from snapscript.core.models import (
     ColumnInfo,
     MultiFileSchemaReport,
@@ -123,10 +125,12 @@ def test_vague_merge_advice_includes_missing_join_key() -> None:
     assert "join key" in advice.missing_details
 
 
-def test_vague_merge_advice_includes_missing_join_type() -> None:
-    advice = advise_task("merge these files", _multi_schema())
+@pytest.mark.parametrize("join_word", ["", "inner", "left", "right", "outer", "full"])
+def test_advice_does_not_interpret_join_type_words(join_word: str) -> None:
+    advice = advise_task(f"Merge orders and products using pid {join_word}", _multi_schema())
 
-    assert "join type" in advice.missing_details
+    assert advice.quality == "good"
+    assert advice.missing_details == []
 
 
 def test_clear_two_file_join_task_returns_good() -> None:

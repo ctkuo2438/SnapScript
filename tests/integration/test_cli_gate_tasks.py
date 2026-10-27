@@ -4,11 +4,14 @@ import json
 import os
 import time
 from collections.abc import Callable
+from dataclasses import replace
 from pathlib import Path
+from unittest.mock import patch
 
 import pandas as pd
 import pytest
 
+from snapscript.config import AppConfig
 from snapscript.core.models import (
     ExecutionResult,
     GeneratedScript,
@@ -285,6 +288,86 @@ def _assert_task_10(
     assert elapsed < 25
 
 
+def _run_gate_case(task_id: str, directory: Path) -> None:
+    task = GATE_TASKS[task_id]
+    input_path = FIXTURE_DIR / str(task["input"])
+    output_path = directory / f"{task_id}_output.csv"
+    start = time.monotonic()
+    status = cli.main([
+        str(task["prompt"]), "--file", str(input_path),
+        "--output", str(output_path), "--yes",
+    ])
+    elapsed = time.monotonic() - start
+    assert status == 0
+    assert output_path.exists()
+    ASSERTIONS[str(task["assert"])](pd.read_csv(output_path), input_path, MANIFEST[task_id], elapsed)
+
+
+def _evaluate_first_attempts(directory: Path, config: AppConfig) -> dict[str, bool]:
+    results = {}
+    first_attempt = replace(config, max_retries=0, provider_max_retries=0)
+    with patch.object(cli, "AppConfig", return_value=first_attempt), patch.object(
+        cli.code_generator, "generate", wraps=cli.code_generator.generate,
+    ) as generate:
+        for task_id in sorted(GATE_TASKS):
+            before = generate.call_count
+            try:
+                _run_gate_case(task_id, directory)
+            except (AssertionError, ValueError, OSError):
+                complete = False
+            else:
+                complete = True
+            results[task_id] = complete and generate.call_count - before == 1
+    return results
+
+
+def _require_first_attempt_threshold(results: dict[str, bool]) -> None:
+    assert set(results) == set(GATE_TASKS)
+    passed = sum(results.values())
+    failed = [task_id for task_id, success in results.items() if not success]
+    assert passed >= 8, f"First-attempt quality gate: {passed}/10 passed; failed task IDs: {failed}"
+
+
+@pytest.mark.parametrize("passed", [7, 8])
+def test_first_attempt_threshold_requires_eight_complete_results(passed):
+    results = {task_id: index < passed for index, task_id in enumerate(sorted(GATE_TASKS))}
+    if passed == 8:
+        _require_first_attempt_threshold(results)
+    else:
+        with pytest.raises(AssertionError, match="7/10"):
+            _require_first_attempt_threshold(results)
+
+
+def test_first_attempt_gate_rejects_retry_only_success(tmp_path, monkeypatch):
+    calls = {}
+    def generate(prompt, model=None, config=None):
+        task_id = next(key for key, task in GATE_TASKS.items() if str(task["prompt"]) in prompt.user_prompt)
+        calls[task_id] = calls.get(task_id, 0) + 1
+        code = "raise ValueError('synthetic first attempt failure')" if calls[task_id] == 1 else str(GATE_TASKS[task_id]["code"])
+        return GeneratedScript(code, code, "fixture")
+    monkeypatch.setattr(cli.code_generator, "generate", generate)
+    config = AppConfig(sandbox_backend="subprocess")
+    results = _evaluate_first_attempts(tmp_path, config)
+    assert not any(results.values())
+    assert set(calls.values()) == {1}
+    with pytest.raises(AssertionError, match="0/10"):
+        _require_first_attempt_threshold(results)
+    calls.clear()
+    with patch.object(cli, "AppConfig", return_value=config):
+        for task_id in GATE_TASKS:
+            _run_gate_case(task_id, tmp_path)
+    assert set(calls.values()) == {2}
+
+
+@pytest.mark.skipif(os.getenv(REAL_PROVIDER_ENV) != "1", reason="Real first-attempt quality gate is explicit opt-in")
+def test_real_provider_first_attempt_quality_gate(tmp_path):
+    if not os.getenv("ANTHROPIC_API_KEY"):
+        pytest.skip("Set ANTHROPIC_API_KEY for the real first-attempt gate")
+    results = _evaluate_first_attempts(tmp_path, AppConfig())
+    print(json.dumps({"first_attempt_passes": sum(results.values()), "tasks": results}, sort_keys=True))
+    _require_first_attempt_threshold(results)
+
+
 @pytest.mark.parametrize("task_id", sorted(GATE_TASKS))
 def test_cli_gate_task(
     task_id: str,
@@ -296,19 +379,15 @@ def test_cli_gate_task(
     task = GATE_TASKS[task_id]
     input_path = FIXTURE_DIR / str(task["input"])
     output_path = tmp_path / f"{task_id}_output.csv"
-    real_provider = os.environ.get(REAL_PROVIDER_ENV) == "1"
     generate_calls: list[PromptPayload] = []
     safety_calls: list[str] = []
     sandbox_calls: list[tuple[str, Path, Path]] = []
 
-    if not real_provider:
-        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
-        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
-        monkeypatch.setattr(
-            cli.code_generator,
-            "generate",
-            _mock_generate(str(task["code"]), generate_calls),
-        )
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.setattr(
+        cli.code_generator, "generate", _mock_generate(str(task["code"]), generate_calls),
+    )
 
     original_check = cli.safety_checker.check
     original_execute = cli.retry_handler.execution_backend.execute
@@ -329,33 +408,17 @@ def test_cli_gate_task(
     monkeypatch.setattr(cli.safety_checker, "check", check_spy)
     monkeypatch.setattr(cli.retry_handler.execution_backend, "execute", execute_spy)
 
-    start = time.monotonic()
-    status = cli.main(
-        [
-            str(task["prompt"]),
-            "--file",
-            str(input_path),
-            "--output",
-            str(output_path),
-            "--yes",
-        ]
-    )
-    elapsed = time.monotonic() - start
+    _run_gate_case(task_id, tmp_path)
 
-    assert status == 0
-    assert output_path.exists()
     assert safety_calls
     assert sandbox_calls
     assert sandbox_calls[-1][1] == input_path
     assert sandbox_calls[-1][2] == output_path
 
-    if not real_provider:
-        assert len(generate_calls) == 1
-        assert safety_calls == [str(task["code"])]
-        assert len(sandbox_calls) == 1
+    assert len(generate_calls) == 1
+    assert safety_calls == [str(task["code"])]
+    assert len(sandbox_calls) == 1
 
-    output = pd.read_csv(output_path)
-    ASSERTIONS[str(task["assert"])](output, input_path, MANIFEST[task_id], elapsed)
 
 
 def _mock_generate(

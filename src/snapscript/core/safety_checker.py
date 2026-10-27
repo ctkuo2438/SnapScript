@@ -1,17 +1,8 @@
-'''
-schema_inspector.inspect(...)
-  -> prompt_builder.build(...)
-  -> retry_handler.run(...)
-      -> code_generator.generate(...)
-          -> GeneratedScript(code=...)
-      -> safety_checker.check(generated.code)
+"""Reject known unsafe syntax before generated code reaches an executor.
 
-code_generator.py only generates valid python syntax, but valid doesn't mean safe.
-Therefore, safety_checker.py do the AST-based safety validation before executing the code, 
-to catch any potentially unsafe code patterns that could cause harm if executed.
-
-Goal: Before the code executed in subprocess or docker sandbox, make sure the code is safe enough to run
-'''
+These AST guardrails do not prove arbitrary Python safe or resolve dynamic paths.
+Docker provides execution isolation; subprocess does not isolate host files.
+"""
 
 from __future__ import annotations
 
@@ -58,7 +49,22 @@ BLOCKED_CALLS = frozenset(
 )
 
 ALLOWED_INTERNAL_IMPORTS = frozenset({"_snapscript_paths"})
-WINDOWS_ABSOLUTE_PATH = re.compile(r"^[a-zA-Z]:[\\/]")
+BLOCKED_NAMES = BLOCKED_CALLS | {"__builtins__"}
+# Import restrictions and dataframe column attributes have different meanings.
+BLOCKED_ATTRIBUTES = (BLOCKED_IMPORTS - {"code", "codeop", "http", "requests"}) | {
+    "urlopen", "urlretrieve",
+}
+BLOCKED_PATH_CALLS = frozenset({"home", "expanduser"})
+PATH_CONSTRUCTORS = frozenset({"Path", "PurePath", "PurePosixPath", "PureWindowsPath"})
+FILE_IO_CALLS = frozenset({"open", "ExcelFile", "ExcelWriter", "get_handle"})
+IO_PATH_KEYWORDS = frozenset({
+    "file", "filepath_or_buffer", "path_or_buf", "io", "excel_writer",
+    "buf", "path", "fname", "path_or_buffer", "con",
+})
+NON_IO_CONVERSIONS = frozenset({
+    "to_datetime", "to_numeric", "to_timedelta", "to_frame", "to_period", "to_timestamp",
+})
+URI_SCHEME = re.compile(r"^[a-zA-Z][a-zA-Z0-9+.-]*:")
 
 
 def check(code: str, config: AppConfig | None = None) -> SafetyResult:
@@ -82,71 +88,86 @@ def check(code: str, config: AppConfig | None = None) -> SafetyResult:
     )
 
 
-# AST visitor that checks for unsafe imports and function calls in the generated code
 class _SafetyVisitor(ast.NodeVisitor):
     def __init__(self, config: AppConfig) -> None:
-        self.config = config # read allowed imports from config
+        self.config = config
         self.violations: list[str] = []
 
-    # check import xxx
     def visit_Import(self, node: ast.Import) -> None:
-        for alias in node.names: # ex: pandas and os
+        for alias in node.names:
             self._check_import(alias.name)
         self.generic_visit(node)
-    
-    # check from xxx import yyy
+
     def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
         if node.module is None:
             self.violations.append("Relative imports are not allowed")
         else:
             self._check_import(node.module)
+        for alias in node.names:
+            self._check_attribute(alias.name)
         self.generic_visit(node)
 
     def visit_Name(self, node: ast.Name) -> None:
-        if node.id == "__builtins__":
-            self.violations.append("Blocked unsafe name: __builtins__")
+        if node.id in BLOCKED_NAMES:
+            self.violations.append(f"Blocked unsafe name: {node.id}")
         self.generic_visit(node)
 
-    # check function calls, ex: pd.read_csv(), open(), eval(), exec(), etc
+    def visit_Attribute(self, node: ast.Attribute) -> None:
+        self._check_attribute(node.attr)
+        self.generic_visit(node)
+
     def visit_Call(self, node: ast.Call) -> None:
         call_name = _call_name(node.func)
         is_bare_call = isinstance(node.func, ast.Name)
         if is_bare_call and call_name in BLOCKED_CALLS:
             self.violations.append(f"Blocked unsafe call: {call_name}")
-        if call_name == "open": # if is open() call, then do extra checks on the file path
-            self._check_open_call(node)
+        if call_name in BLOCKED_PATH_CALLS:
+            self.violations.append(f"Blocked home path access: {call_name}")
+        if call_name is not None:
+            self._check_io_call(node, call_name)
         self.generic_visit(node)
 
-    # validate an imported module name against the blocklist and allowlist
+    def _check_attribute(self, name: str) -> None:
+        if (name.startswith("__") and name != "__name__") or name in BLOCKED_ATTRIBUTES:
+            self.violations.append(f"Blocked unsafe attribute: {name}")
+
     def _check_import(self, module_name: str) -> None:
-        root_name = module_name.split(".", 1)[0] # get the root module name, ex: os.path -> os
+        root_name, *attributes = module_name.split(".")
         if root_name in BLOCKED_IMPORTS:
             self.violations.append(f"Blocked unsafe import: {module_name}")
             return
         if root_name not in self._allowed_import_roots():
             self.violations.append(f"Import is not allowed: {module_name}")
+        for name in attributes:
+            self._check_attribute(name)
 
-    # compute the set of allowed root module names from config plus internal modules
     def _allowed_import_roots(self) -> set[str]:
         return {
             module.split(".", 1)[0]
             for module in (set(self.config.allowed_imports) | ALLOWED_INTERNAL_IMPORTS)
         }
 
-    # check if the open() call has a literal string argument that looks like a file path, 
-    #   which could be dangerous
-    def _check_open_call(self, node: ast.Call) -> None:
-        if not node.args:
+    def _check_io_call(self, node: ast.Call, name: str) -> None:
+        if name in PATH_CONSTRUCTORS or name == "joinpath":
+            path_args = node.args
+        elif name in FILE_IO_CALLS or (
+            name.startswith(("read_", "to_")) and name not in NON_IO_CONVERSIONS
+        ):
+            path_args = node.args[:1] + [
+                keyword.value for keyword in node.keywords
+                if keyword.arg in IO_PATH_KEYWORDS
+            ]
+        else:
             return
-        first_arg = node.args[0]
-        if isinstance(first_arg, ast.Constant) and isinstance(first_arg.value, str):
-            path_value = first_arg.value
-            if _is_dangerous_literal_path(path_value):
+        for arg in path_args:
+            if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
+                if not _is_dangerous_literal_path(arg.value):
+                    continue
                 self.violations.append(
-                    f"Blocked open() with unsafe literal path: {path_value}"
+                    f"Blocked {name}() with unsafe literal path: {arg.value}"
                 )
 
-# ex: pd.read_csv(INPUT_PATH) -> read_csv
+
 def _call_name(func: ast.expr) -> str | None:
     if isinstance(func, ast.Name):
         return func.id
@@ -155,12 +176,11 @@ def _call_name(func: ast.expr) -> str | None:
     return None
 
 
-# check if the literal string looks like a file path that could be dangerous, 
-# ex: / or ../ or ~ or C:\ etc
 def _is_dangerous_literal_path(path_value: str) -> bool:
     return (
         "/" in path_value
+        or "\\" in path_value
         or ".." in path_value
-        or path_value.startswith("~")
-        or WINDOWS_ABSOLUTE_PATH.match(path_value) is not None
+        or path_value.lstrip().startswith("~")
+        or URI_SCHEME.match(path_value.lstrip()) is not None
     )

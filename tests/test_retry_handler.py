@@ -1,9 +1,14 @@
 from pathlib import Path
+import subprocess
+import time
+from unittest.mock import Mock
 
 import pytest
 
 from snapscript.config import AppConfig
-from snapscript.core import code_generator, retry_handler
+from snapscript.core import _docker_runtime, code_generator, retry_handler, sandbox_executor
+from snapscript.core._process import CaptureLimitExceeded
+from snapscript.interfaces import cli
 from snapscript.core.models import (
     ExecutionResult,
     GeneratedScript,
@@ -28,8 +33,8 @@ def _success() -> ExecutionResult:
     return ExecutionResult(success=True, stdout="ok", exit_code=0)
 
 
-def _failure(stderr: str, exit_code: int = 1) -> ExecutionResult:
-    return ExecutionResult(success=False, stderr=stderr, exit_code=exit_code)
+def _failure(stderr: str, exit_code: int = 1, category: str = "sandbox_failure") -> ExecutionResult:
+    return ExecutionResult(success=False, stderr=stderr, exit_code=exit_code, error_category=category)
 
 
 def _input_specs(tmp_path: Path) -> list[InputFileSpec]:
@@ -39,9 +44,9 @@ def _input_specs(tmp_path: Path) -> list[InputFileSpec]:
     ]
 
 
-@pytest.mark.parametrize("error", ["Input validation: products missing column pid", "Output is empty"])
+@pytest.mark.parametrize("error,category", [("Input validation: products missing column pid", "input_validation"), ("Output is empty", "output_empty")])
 def test_run_does_not_retry_input_validation_errors(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, error: str,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, error: str, category: str,
 ) -> None:
     calls = []
 
@@ -50,7 +55,7 @@ def test_run_does_not_retry_input_validation_errors(
         return _script("print('validation')")
 
     monkeypatch.setattr(code_generator, "generate", fake_generate)
-    monkeypatch.setattr(retry_handler.execution_backend, "execute", lambda *a, **k: _failure(error))
+    monkeypatch.setattr(retry_handler.execution_backend, "execute", lambda *a, **k: _failure(error, category=category))
 
     result = retry_handler.run(_prompt(), tmp_path / "input.csv", tmp_path / "out.csv")
 
@@ -288,7 +293,7 @@ def test_run_does_not_retry_timeouts(
         retry_handler.execution_backend,
         "execute",
         lambda code, input_path, output_path, config=None: _failure(
-            "Execution timed out", -1
+            "Execution timed out", -1, category="timeout"
         ),
     )
 
@@ -754,3 +759,57 @@ def test_run_many_validation_failures_return_without_generation_or_execution(
     assert result.exit_code == 1
     assert expected_error in result.stderr
     assert calls == {"generate": 0, "safety": 0, "execute": 0}
+
+
+@pytest.mark.parametrize("category,retry", [
+    ("sandbox_failure", True), ("output_validation", True),
+    ("timeout", False), ("capture_limit", False), ("output_empty", False),
+    ("output_limit", False), ("output_commit", False), ("workspace_failure", False),
+    ("input_validation", False), ("backend_unavailable", False),
+    ("safety_violation", False), ("provider_authentication", False),
+])
+def test_execution_retry_depends_only_on_category(category, retry):
+    result = ExecutionResult(False, stderr="The diagnostic wording changed", exit_code=1, error_category=category)
+    assert retry_handler._should_retry_execution(result) is retry
+
+
+@pytest.mark.parametrize("message", [
+    "ValueError: upstream lookup timed out",
+    "ValueError: column contains Output exceeds size limit",
+    "ValueError: field named Output already exists",
+    "ValueError: literal Input validation: is part of this field",
+    "Output is empty",
+])
+def test_script_message_cannot_override_repairable_category(message):
+    result = ExecutionResult(False, stderr=message, exit_code=1, error_category="sandbox_failure")
+    assert retry_handler._should_retry_execution(result)
+
+
+@pytest.mark.parametrize("category,message,expected", [
+    ("safety_violation", "Static checks rejected this candidate", 2),
+    ("sandbox_failure", "Safety violation: a user-provided field name", 3),
+])
+def test_cli_exit_status_uses_category(category, message, expected):
+    result = ExecutionResult(False, stderr=message, exit_code=1, error_category=category)
+    assert cli._execution_status(result) == expected
+
+
+@pytest.mark.parametrize("docker", [False, True])
+@pytest.mark.parametrize("kind,category", [
+    ("script", "sandbox_failure"), ("validation", "input_validation"),
+    ("timeout", "timeout"), ("capture", "capture_limit"),
+])
+def test_backend_sets_categories_at_the_process_boundary(tmp_path, monkeypatch, docker, kind, category):
+    stderr = "ValueError: lookup timed out" if kind == "script" else "ValueError: Input validation: missing pid"
+    outcome = subprocess.CompletedProcess(["fixture"], 1, "", stderr)
+    if kind == "timeout":
+        outcome = subprocess.TimeoutExpired(["fixture"], 1)
+    elif kind == "capture":
+        outcome = CaptureLimitExceeded("fixture", "fixture")
+    runner = _docker_runtime if docker else sandbox_executor
+    monkeypatch.setattr(runner, "run_process", Mock(side_effect=outcome) if isinstance(outcome, Exception) else Mock(return_value=outcome))
+    monkeypatch.setattr(_docker_runtime, "_remove_container", lambda name: None)
+    run = _docker_runtime.run if docker else sandbox_executor._run_script
+    result = run(tmp_path, AppConfig(sandbox_backend="docker" if docker else "subprocess"), time.monotonic())
+    assert not result.success
+    assert result.error_category == category

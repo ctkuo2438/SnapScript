@@ -36,6 +36,14 @@ def test_app_config_defaults_to_subprocess_sandbox_backend() -> None:
     assert config.sandbox_backend == "subprocess"
 
 
+@pytest.mark.parametrize("source", ["argument", "environment"])
+def test_docker_timeout_above_ceiling_is_explicitly_rejected(monkeypatch, source):
+    if source == "environment":
+        monkeypatch.setenv("SNAPSCRIPT_DOCKER_TIMEOUT_SECONDS", "120")
+    with pytest.raises(ValueError, match="30"):
+        AppConfig(**({"docker_timeout_seconds": 120} if source == "argument" else {}))
+
+
 def test_app_config_default_docker_settings_are_local_and_restricted() -> None:
     config = AppConfig()
 
@@ -71,7 +79,7 @@ def test_app_config_reads_docker_settings_from_environment(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("SNAPSCRIPT_DOCKER_IMAGE", "custom-sandbox:dev")
-    monkeypatch.setenv("SNAPSCRIPT_DOCKER_TIMEOUT_SECONDS", "45")
+    monkeypatch.setenv("SNAPSCRIPT_DOCKER_TIMEOUT_SECONDS", "17")
     monkeypatch.setenv("SNAPSCRIPT_DOCKER_MEMORY_LIMIT", "1g")
     monkeypatch.setenv("SNAPSCRIPT_DOCKER_CPU_LIMIT", "2.0")
     monkeypatch.setenv("SNAPSCRIPT_DOCKER_NETWORK_DISABLED", "false")
@@ -79,7 +87,7 @@ def test_app_config_reads_docker_settings_from_environment(
     config = AppConfig()
 
     assert config.docker_image == "custom-sandbox:dev"
-    assert config.docker_timeout_seconds == 45
+    assert config.docker_timeout_seconds == 17
     assert config.docker_memory_limit == "1g"
     assert config.docker_cpu_limit == "2.0"
     assert config.docker_network_disabled is False

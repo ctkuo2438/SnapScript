@@ -201,6 +201,100 @@ def test_check_blocks_builtins_aliasing() -> None:
     assert "Blocked unsafe name: __builtins__" in result.violations
 
 
+@pytest.mark.parametrize("name", [
+    "eval", "exec", "compile", "__import__", "globals", "locals",
+    "getattr", "setattr", "delattr",
+])
+def test_check_blocks_unsafe_names_used_as_values(name: str) -> None:
+    result = safety_checker.check(f"callback = {name}\n")
+
+    assert result.ast_valid
+    assert not result.is_safe
+    assert f"Blocked unsafe name: {name}" in result.violations
+
+
+@pytest.mark.parametrize("code", [
+    pytest.param("value.__class__", id="class-attribute"),
+    pytest.param("().__class__.__base__.__subclasses__()", id="introspection-chain"),
+    pytest.param("handler.__globals__", id="function-globals"),
+    pytest.param("handler.__code__", id="function-code"),
+    pytest.param("value.__getattribute__('__class__')", id="dunder-getattribute"),
+    pytest.param("pd.io.common.os.system('true')", id="pandas-os"),
+    pytest.param("pd.io.common.sys.modules", id="pandas-sys"),
+    pytest.param("pd.io.common.subprocess.run(['true'])", id="pandas-subprocess"),
+    pytest.param("from pandas.io.common import os as helper", id="from-import-module"),
+    pytest.param("from pandas import __builtins__ as helper", id="from-import-dunder"),
+])
+def test_check_blocks_unsafe_attribute_access(code: str) -> None:
+    result = safety_checker.check(code)
+
+    assert result.ast_valid
+    assert not result.is_safe
+    assert result.violations
+
+
+@pytest.mark.parametrize("code", [
+    pytest.param("open(file='/etc/passwd')", id="open-keyword"),
+    pytest.param("pd.read_csv('/etc/passwd')", id="pandas-absolute-read"),
+    pytest.param("pd.read_csv(filepath_or_buffer='/etc/passwd')", id="pandas-read-keyword"),
+    pytest.param("pd.read_excel(io='/opt/private.xlsx')", id="excel-read-keyword"),
+    pytest.param("pd.ExcelFile('/etc/private.xlsx')", id="excel-file-constructor"),
+    pytest.param("pd.ExcelWriter('/tmp/out.xlsx')", id="excel-writer-constructor"),
+    pytest.param("pd.ExcelWriter(path='/tmp/out.xlsx')", id="excel-writer-keyword"),
+    pytest.param("pd.read_csv('https://example.invalid/in.csv')", id="https-read"),
+    pytest.param("pd.read_csv('ftp://example.invalid/in.csv')", id="ftp-read"),
+    pytest.param("pd.read_csv('file:///etc/passwd')", id="file-url-read"),
+    pytest.param("pd.read_csv('data:text/csv,value')", id="data-url-read"),
+    pytest.param("pd.read_csv('s3:private.csv')", id="scheme-without-slashes"),
+    pytest.param("df.to_csv('/tmp/result.csv')", id="pandas-absolute-write"),
+    pytest.param("df.to_csv(path_or_buf='s3://bucket/out.csv')", id="pandas-write-keyword"),
+    pytest.param("df.to_excel(excel_writer='/mnt/out.xlsx')", id="excel-write-keyword"),
+    pytest.param("df.to_json(path_or_buf='../out.json')", id="json-traversal-write"),
+    pytest.param("df.to_html(buf='https://example.invalid/out.html')", id="html-write-keyword"),
+    pytest.param("Path('/etc/passwd').open()", id="path-open-receiver"),
+    pytest.param("pathlib.Path('safe', '..', 'private.csv')", id="path-traversal-component"),
+    pytest.param("Path('safe', '/etc/passwd')", id="path-absolute-component"),
+    pytest.param("pd.read_csv(" + repr(r"C:\private\input.csv") + ")", id="windows-absolute"),
+    pytest.param("pd.read_csv(" + repr(r"\\server\share\input.csv") + ")", id="windows-unc"),
+    pytest.param("Path(" + repr(r"\private.csv") + ")", id="windows-rooted"),
+    pytest.param("pd.io.common.get_handle('https://example.invalid/data.csv', 'r')", id="get-handle-url"),
+    pytest.param("pd.io.common.get_handle('/etc/passwd', 'r')", id="get-handle-absolute"),
+    pytest.param("pd.io.common.get_handle(path_or_buf='../secret.csv', mode='r')", id="get-handle-keyword"),
+])
+def test_check_blocks_unsafe_literal_io_paths(code: str) -> None:
+    result = safety_checker.check(code)
+
+    assert result.ast_valid
+    assert not result.is_safe
+    assert any("literal path" in violation for violation in result.violations)
+
+
+@pytest.mark.parametrize("code", [
+    "open(file=OUTPUT_PATH, mode='w')",
+    "pd.read_csv(filepath_or_buffer=INPUT_PATH)",
+    "pd.read_excel(io=INPUT_PATHS['orders'])",
+    "df.to_csv(path_or_buf=OUTPUT_PATH, index=False)",
+    "df.to_excel(excel_writer=OUTPUT_PATH, index=False)",
+    "pd.ExcelFile(INPUT_PATH)",
+    "pd.ExcelWriter(path=OUTPUT_PATH)",
+    "from pathlib import Path\nPath('notes.txt').open('w')",
+    "Path(INPUT_PATH).open()",
+    "pd.read_csv(INPUT_PATH, sep='/')",
+    "df.to_csv(OUTPUT_PATH, date_format='%Y/%m/%d')",
+    "pd.to_datetime('2026/10/26')",
+    "series.to_frame('amount/usd')",
+    "df['__class__'] = df['os']",
+    "pd.io.common.get_handle(INPUT_PATH, 'r')",
+    "pd.io.common.get_handle(path_or_buf=OUTPUT_PATH, mode='w')",
+])
+def test_check_allows_legitimate_io_and_data_methods(code: str) -> None:
+    result = safety_checker.check(code)
+
+    assert result.ast_valid
+    assert result.is_safe
+    assert result.violations == []
+
+
 def test_check_allows_name_dunder() -> None:
     code = (
         "from _snapscript_paths import OUTPUT_PATH\n"
@@ -220,6 +314,55 @@ def test_check_returns_invalid_result_for_syntax_error() -> None:
     assert result.is_safe is False
     assert result.ast_valid is False
     assert any("syntax" in violation.lower() for violation in result.violations)
+
+
+@pytest.mark.parametrize("code", [
+    "df.code.str.upper()", "df.requests.sum()", "df.http", "df.codeop",
+    "type(e).__name__", "df.home.str.upper()", "df['url'].str.startswith('https://')",
+    "df['url'].eq('http://example.invalid')",
+])
+def test_check_allows_ordinary_attributes_and_url_data(code: str) -> None:
+    assert safety_checker.check(code).is_safe
+
+
+@pytest.mark.parametrize("code", [
+    "pd.io.common.urlopen('http://example.invalid')",
+    "opener = pd.io.common.urlopen",
+    "from pandas.io.common import urlopen as opener",
+    "Path.home().joinpath('private.csv').read_text()",
+    "Path(INPUT_PATH).expanduser()",
+    "Path(INPUT_PATH).joinpath('/etc/passwd').read_text()",
+    "Path(INPUT_PATH).joinpath('..', 'private.csv').open()",
+    "Path(INPUT_PATH).joinpath('https://example.invalid')",
+])
+def test_check_blocks_network_home_and_literal_joinpath(code: str) -> None:
+    result = safety_checker.check(code)
+    assert result.ast_valid
+    assert not result.is_safe
+
+
+@pytest.mark.parametrize("backend", ["subprocess", "docker"])
+@pytest.mark.parametrize("code", [
+    "pd.io.common.urlopen('http://example.invalid')", "Path.home()",
+    "Path(INPUT_PATH).expanduser()", "Path(INPUT_PATH).joinpath('/etc/passwd')",
+])
+def test_unsafe_entrypoints_never_execute(tmp_path, monkeypatch, backend, code):
+    from unittest.mock import Mock
+    from snapscript.config import AppConfig
+    from snapscript.core import code_generator, execution_backend, retry_handler
+    from snapscript.core.models import GeneratedScript, PromptPayload
+
+    source = tmp_path / "input.csv"
+    source.write_text("value\n1\n")
+    generator = Mock(return_value=GeneratedScript(code, code, "fixture"))
+    executor = Mock()
+    monkeypatch.setattr(code_generator, "generate", generator)
+    monkeypatch.setattr(execution_backend, "preflight", lambda config: None)
+    monkeypatch.setattr(execution_backend, "execute", executor)
+    result = retry_handler.run(PromptPayload("system", "Copy"), source, tmp_path / "out.csv", config=AppConfig(sandbox_backend=backend))
+    assert result.error_category == "safety_violation"
+    generator.assert_called_once()
+    executor.assert_not_called()
 
 
 def test_check_fails_safely_for_incomplete_assignment() -> None:

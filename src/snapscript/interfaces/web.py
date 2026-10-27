@@ -1,90 +1,41 @@
-'''
-Streamlit UI
-'''
-
+"""Streamlit composition; input handling and pipeline work live in focused modules."""
 from __future__ import annotations
 
 from collections.abc import MutableMapping
-from datetime import datetime, timezone
-from io import BytesIO
-import json
-from pathlib import Path, PureWindowsPath
-import re
-import tempfile
+from dataclasses import replace
+import os
+from pathlib import Path
 import time
-from typing import cast
-import uuid
-
-import pandas as pd
 import streamlit as st
 
 from snapscript.config import AppConfig
-from snapscript.core import (
-    audit_logger,
-    prompt_builder,
-    retry_handler,
-    schema_inspector,
-    task_advisor,
-)
-from snapscript.core.audit_logger import redact_secret_values as redact_error_text
-from snapscript.core.models import (
-    ExecutionResult,
-    InputFileSpec,
-    MultiFileSchemaReport,
-    PromptPayload,
-    SchemaReport,
-    TaskAdvice,
+from snapscript.core.models import ErrorCategory, ExecutionResult, InputValidationError
+from snapscript.interfaces import web_inputs, web_assistant, web_pipeline, web_audit
+from snapscript.interfaces.errors import (
+    exception_category, format_error, format_execution_error, format_exception_error,
 )
 from snapscript.interfaces.web_state import (
-    COOLDOWN_SECONDS,
-    ERROR_SOURCE_EXECUTION,
-    ERROR_SOURCE_UPLOAD,
-    ERROR_SOURCE_VALIDATION,
-    INPUT_MODE_SINGLE,
-    INPUT_MODE_TWO,
-    MAX_REWRITES_PER_SESSION,
-    MAX_RUNS_PER_SESSION,
-    REWRITE_COOLDOWN_SECONDS,
-    SESSION_DEFAULTS,
-    begin_accepted_rewrite,
-    begin_accepted_run,
-    check_rate_limit,
-    check_rewrite_rate_limit,
-    clear_output_state,
-    get_remaining_rewrites,
-    get_remaining_runs,
+    INPUT_MODE_SINGLE, INPUT_MODE_TWO, MAX_RUNS_PER_SESSION,
+    begin_accepted_run, check_rate_limit, get_remaining_runs,
     initialize_session_state as _initialize_session_state,
-    mark_run_failure,
-    mark_run_success,
-    mark_validation_error,
+    mark_run_failure, mark_run_success, mark_validation_error, update_input_state,
+)
+
+SANDBOX_BACKEND_ENV = "SNAPSCRIPT_SANDBOX_BACKEND"
+DOCKER_BACKEND_HINT = "SNAPSCRIPT_SANDBOX_BACKEND=docker uv run streamlit run app.py"
+DOCKER_IMAGE_BUILD_HINT = "docker build -t snapscript-sandbox:local docker/sandbox"
+SUBPROCESS_BACKEND_WARNING = (
+    "Subprocess backend is not isolated: generated code can reach this computer's "
+    "files and network. Upload only trusted, non-private files, or use Docker."
 )
 
 
-ALLOWED_UPLOAD_SUFFIXES = {".csv", ".xlsx"}
-MAX_UPLOAD_BYTES = 10 * 1024 * 1024
-PREVIEW_MAX_ROWS = 100
-ERROR_MAX_CHARS = 2000
-GENERIC_ERROR_MESSAGE = "Something went wrong."
-PROVIDER_ERROR_MESSAGE = (
-    "Provider call failed. Check your API key or provider configuration."
-)
-SAFETY_ERROR_MESSAGE = "Generated code was rejected by the safety checker."
-SANDBOX_ERROR_MESSAGE = "Execution failed in the sandbox."
-TASK_REWRITE_ERROR_MESSAGE = (
-    "Could not improve the task. Check provider configuration and try again."
-)
-TASK_REWRITE_INPUT_ERROR_MESSAGE = (
-    "Could not improve the task. Check the uploaded files and task text."
-)
-AUDIT_INTERFACE = "streamlit"
-AUDIT_LOG_PATH = audit_logger.DEFAULT_AUDIT_LOG_PATH
-DOWNLOAD_MIME_TYPES = {
-    ".csv": "text/csv",
-    ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-}
-DOCKER_BACKEND_HINT = (
-    "SNAPSCRIPT_SANDBOX_BACKEND=docker uv run streamlit run app.py"
-)
+def default_web_config() -> AppConfig:
+    """Streamlit runs uploads in Docker unless the backend is explicitly chosen."""
+    config = AppConfig()
+    if SANDBOX_BACKEND_ENV in os.environ:
+        return config
+    return replace(config, sandbox_backend="docker")
 
 
 def initialize_session_state(
@@ -97,995 +48,13 @@ def initialize_session_state(
 def render_runtime_sidebar(config: AppConfig) -> None:
     st.sidebar.subheader("Runtime")
     st.sidebar.write(f"Sandbox backend: {config.sandbox_backend}")
+    if config.sandbox_backend == "docker":
+        st.sidebar.caption("Build the sandbox image once:")
+        st.sidebar.code(DOCKER_IMAGE_BUILD_HINT)
+        return
+    st.sidebar.warning(SUBPROCESS_BACKEND_WARNING)
     st.sidebar.caption("Use Docker backend:")
     st.sidebar.code(DOCKER_BACKEND_HINT)
-
-
-def _task_rewriter_module():
-    from snapscript.core import task_rewriter
-
-    return task_rewriter
-
-
-def truncate_error_text(
-    message: str,
-    max_chars: int = ERROR_MAX_CHARS,
-) -> str:
-    if len(message) <= max_chars:
-        return message
-    return f"{message[:max_chars]}... [truncated]"
-
-# remove the noise from tracebacks and keep the most relevant error message
-def _strip_traceback_noise(message: str) -> str:
-    lines = message.splitlines()
-    if not any(line.strip().startswith("Traceback") for line in lines):
-        return message.strip()
-
-    useful_lines: list[str] = []
-    for line in lines:
-        stripped = line.strip()
-        if not stripped:
-            continue
-        if stripped.startswith("Traceback"):
-            continue
-        if stripped.startswith("File "):
-            continue
-        if stripped.startswith("^"):
-            continue
-        if stripped.startswith("During handling"):
-            continue
-        if stripped.startswith("The above exception"):
-            continue
-        useful_lines.append(stripped)
-
-    return useful_lines[-1] if useful_lines else GENERIC_ERROR_MESSAGE
-
-
-def _redact_internal_paths(message: str) -> str:
-    return re.sub(
-        r"(?:(?:/private)?/tmp|/var/folders)/[^\s'\",;:]+",
-        "[path]",
-        message,
-    )
-
-
-def format_user_error(
-    message: str | None,
-    max_chars: int | None = None,
-) -> str:
-    text = "" if message is None else str(message).strip()
-    if not text:
-        return GENERIC_ERROR_MESSAGE
-
-    text = _strip_traceback_noise(text)
-    text = redact_error_text(text)
-    text = _redact_internal_paths(text)
-    if not text.strip():
-        text = GENERIC_ERROR_MESSAGE
-    limit = ERROR_MAX_CHARS if max_chars is None else max_chars
-    return truncate_error_text(text, limit)
-
-
-def _is_provider_error(message: str) -> bool:
-    lower = message.lower()
-    provider_indicators = (
-        "providercallerror",
-        "provider call failed",
-        "api_key",
-        "api key",
-        "authentication",
-        "unauthorized",
-        "forbidden",
-        "401",
-        "403",
-    )
-    return any(indicator in lower for indicator in provider_indicators)
-
-
-def _is_safety_error(message: str) -> bool:
-    lower = message.lower()
-    return "safety" in lower or "unsafe" in lower
-
-
-def _format_pipeline_error(
-    message: str | None,
-    exit_code: int | None = None,
-    default_to_sandbox: bool = False,
-) -> str:
-    raw_message = "" if message is None else str(message)
-    if _is_provider_error(raw_message):
-        return PROVIDER_ERROR_MESSAGE
-    if _is_safety_error(raw_message):
-        return SAFETY_ERROR_MESSAGE
-
-    safe_summary = format_user_error(raw_message)
-    if default_to_sandbox and safe_summary != GENERIC_ERROR_MESSAGE:
-        return format_user_error(
-            f"{SANDBOX_ERROR_MESSAGE} Summary: {safe_summary}"
-        )
-    if default_to_sandbox or exit_code:
-        return SANDBOX_ERROR_MESSAGE
-    return safe_summary
-
-
-def classify_error_category(
-    message: str | None,
-    exit_code: int | None = None,
-    default_to_sandbox: bool = False,
-) -> str:
-    raw_message = "" if message is None else str(message)
-    if _is_provider_error(raw_message):
-        return "provider_failure"
-    if _is_safety_error(raw_message):
-        return "safety_violation"
-    if default_to_sandbox or exit_code:
-        return "sandbox_failure"
-    return "unknown_failure"
-
-
-def normalize_task_text(task_text: str) -> str:
-    return task_text.strip()
-
-
-def validate_task_text(task_text: str) -> str:
-    normalized = normalize_task_text(task_text)
-    if not normalized:
-        raise ValueError("Task description is required.")
-    return normalized
-
-
-def clear_input_error_state(state: MutableMapping[str, object]) -> None:
-    if "error_source" not in state or state.get("error_source") in {
-        ERROR_SOURCE_UPLOAD,
-        ERROR_SOURCE_VALIDATION,
-    }:
-        state["error_message"] = None
-        state["error_source"] = None
-
-
-def can_generate(
-    state: MutableMapping[str, object],
-) -> tuple[bool, str | None]:
-    if str(state.get("input_mode", INPUT_MODE_SINGLE)) == INPUT_MODE_TWO:
-        try:
-            validate_two_file_upload_state(state)
-        except ValueError as exc:
-            return False, str(exc)
-    elif (
-        state.get("uploaded_file_bytes") is None
-        or state.get("uploaded_file_suffix") is None
-    ):
-        return False, "Upload a CSV or Excel file before generating."
-
-    try:
-        validate_task_text(str(state.get("task_text", "")))
-    except ValueError as exc:
-        return False, str(exc)
-
-    if int(state.get("run_count", 0)) >= MAX_RUNS_PER_SESSION:
-        return False, "Run limit reached for this session."
-
-    return True, None
-
-
-def validate_two_file_upload_state(
-    state: MutableMapping[str, object],
-) -> list[InputFileSpec]:
-    if (
-        state.get("first_uploaded_file_bytes") is None
-        or state.get("first_uploaded_file_suffix") is None
-        or state.get("second_uploaded_file_bytes") is None
-        or state.get("second_uploaded_file_suffix") is None
-    ):
-        raise ValueError("Upload both files before generating.")
-
-    first_name = str(state.get("first_logical_name", ""))
-    second_name = str(state.get("second_logical_name", ""))
-    if not first_name.strip() or not second_name.strip():
-        raise ValueError("Logical names are required for two-file mode.")
-
-    if int(state.get("run_count", 0)) >= MAX_RUNS_PER_SESSION:
-        raise ValueError("Run limit reached for this session.")
-
-    try:
-        return schema_inspector.validate_input_specs(
-            [
-                InputFileSpec(name=first_name, path=Path("first_input")),
-                InputFileSpec(name=second_name, path=Path("second_input")),
-            ]
-        )
-    except schema_inspector.SchemaInspectionError as exc:
-        raise ValueError(str(exc)) from exc
-
-
-def validate_upload_suffix(file_name: str) -> str:
-    suffix = Path(file_name).suffix.lower()
-    if suffix not in ALLOWED_UPLOAD_SUFFIXES:
-        display_suffix = suffix or "missing extension"
-        raise ValueError(f"Unsupported file type: {display_suffix}")
-    return suffix
-
-
-def validate_upload_size(size_or_bytes: int | bytes) -> None:
-    size: int
-    if isinstance(size_or_bytes, bytes):
-        size = len(size_or_bytes)
-    else:
-        size = int(size_or_bytes)
-
-    if size > MAX_UPLOAD_BYTES:
-        raise ValueError("Upload is too large. Maximum size is 10 MB.")
-
-
-def store_uploaded_file(
-    state: MutableMapping[str, object],
-    file_name: str,
-    file_bytes: bytes,
-) -> None:
-    try:
-        suffix = validate_upload_suffix(file_name)
-        validate_upload_size(file_bytes)
-    except ValueError as exc:
-        state["uploaded_file_name"] = None
-        state["uploaded_file_bytes"] = None
-        state["uploaded_file_suffix"] = None
-        state["error_message"] = str(exc)
-        state["error_source"] = ERROR_SOURCE_UPLOAD
-        raise
-
-    state["uploaded_file_name"] = file_name
-    state["uploaded_file_bytes"] = file_bytes
-    state["uploaded_file_suffix"] = suffix
-    clear_input_error_state(state)
-
-
-def store_named_uploaded_file(
-    state: MutableMapping[str, object],
-    prefix: str,
-    file_name: str,
-    file_bytes: bytes,
-) -> None:
-    name_key = f"{prefix}_uploaded_file_name"
-    bytes_key = f"{prefix}_uploaded_file_bytes"
-    suffix_key = f"{prefix}_uploaded_file_suffix"
-    try:
-        suffix = validate_upload_suffix(file_name)
-        validate_upload_size(file_bytes)
-    except ValueError as exc:
-        state[name_key] = None
-        state[bytes_key] = None
-        state[suffix_key] = None
-        state["error_message"] = str(exc)
-        state["error_source"] = ERROR_SOURCE_UPLOAD
-        raise
-
-    state[name_key] = file_name
-    state[bytes_key] = file_bytes
-    state[suffix_key] = suffix
-    clear_input_error_state(state)
-
-
-def write_upload_to_temp_input(
-    temp_dir: Path,
-    file_bytes: bytes,
-    suffix: str,
-) -> Path:
-    normalized_suffix = validate_upload_suffix(f"input{suffix}")
-    temp_root = temp_dir.resolve()
-    input_path = (temp_root / f"input{normalized_suffix}").resolve()
-    if input_path.parent != temp_root:
-        raise ValueError("Temporary input path must stay inside temp_dir.")
-    input_path.write_bytes(file_bytes)
-    return input_path
-
-
-def write_named_upload_to_temp_input(
-    temp_dir: Path,
-    file_bytes: bytes,
-    suffix: str,
-    logical_name: str,
-    index: int,
-) -> Path:
-    normalized_suffix = validate_upload_suffix(f"input{suffix}")
-    safe_name = re.sub(r"[^a-z0-9_]+", "_", logical_name).strip("_")
-    if not safe_name:
-        raise ValueError("Logical input name is required.")
-    temp_root = temp_dir.resolve()
-    input_path = (
-        temp_root / f"input_{index}_{safe_name}{normalized_suffix}"
-    ).resolve()
-    if input_path.parent != temp_root:
-        raise ValueError("Temporary input path must stay inside temp_dir.")
-    input_path.write_bytes(file_bytes)
-    return input_path
-
-
-def build_prompt_coach_advice(
-    state: MutableMapping[str, object],
-    config: AppConfig,
-) -> TaskAdvice | None:
-    task_text = str(state.get("task_text", ""))
-    if not normalize_task_text(task_text):
-        return None
-
-    try:
-        if str(state.get("input_mode", INPUT_MODE_SINGLE)) == INPUT_MODE_TWO:
-            schema = _inspect_two_file_prompt_coach_schema(state, config)
-        else:
-            schema = _inspect_single_file_prompt_coach_schema(state, config)
-    except (ValueError, OSError, schema_inspector.SchemaInspectionError):
-        return None
-
-    return task_advisor.advise_task(task_text, schema)
-
-
-def can_improve_task(
-    state: MutableMapping[str, object],
-) -> tuple[bool, str | None]:
-    try:
-        validate_task_text(str(state.get("task_text", "")))
-    except ValueError as exc:
-        return False, str(exc)
-
-    if str(state.get("input_mode", INPUT_MODE_SINGLE)) == INPUT_MODE_TWO:
-        try:
-            _validate_two_file_rewrite_context(state)
-        except ValueError as exc:
-            return False, str(exc)
-    elif (
-        state.get("uploaded_file_bytes") is None
-        or state.get("uploaded_file_suffix") is None
-    ):
-        return False, "Upload a CSV or Excel file before improving the task."
-
-    return True, None
-
-
-def _validate_two_file_rewrite_context(
-    state: MutableMapping[str, object],
-) -> None:
-    if (
-        state.get("first_uploaded_file_bytes") is None
-        or state.get("first_uploaded_file_suffix") is None
-        or state.get("second_uploaded_file_bytes") is None
-        or state.get("second_uploaded_file_suffix") is None
-    ):
-        raise ValueError("Upload both files before improving the task.")
-
-    first_name = str(state.get("first_logical_name", ""))
-    second_name = str(state.get("second_logical_name", ""))
-    if not first_name.strip() or not second_name.strip():
-        raise ValueError("Logical names are required for two-file mode.")
-
-    try:
-        schema_inspector.validate_input_specs(
-            [
-                InputFileSpec(name=first_name, path=Path("first_input")),
-                InputFileSpec(name=second_name, path=Path("second_input")),
-            ]
-        )
-    except schema_inspector.SchemaInspectionError as exc:
-        raise ValueError(str(exc)) from exc
-
-
-def build_task_rewrite_context(
-    state: MutableMapping[str, object],
-    config: AppConfig,
-) -> tuple[SchemaReport | MultiFileSchemaReport, TaskAdvice]:
-    task_text = validate_task_text(str(state.get("task_text", "")))
-    if str(state.get("input_mode", INPUT_MODE_SINGLE)) == INPUT_MODE_TWO:
-        schema = _inspect_two_file_prompt_coach_schema(state, config)
-    else:
-        schema = _inspect_single_file_prompt_coach_schema(state, config)
-    return schema, task_advisor.advise_task(task_text, schema)
-
-
-def improve_task_with_ai(
-    state: MutableMapping[str, object],
-    config: AppConfig,
-) -> None:
-    task_text = str(state.get("task_text", ""))
-    provider = config.llm_provider
-    model = config.default_model
-    schema_summary: dict[str, object] | None = None
-    rewritten_task_text: str | None = None
-    success = False
-    provider_called = False
-    error_category: str | None = None
-    audit_accepted = bool(state.get("is_rewriting_task", False))
-    start = time.monotonic()
-
-    try:
-        task_text = validate_task_text(str(state.get("task_text", "")))
-        schema, advice = build_task_rewrite_context(state, config)
-        schema_summary = _schema_summary_for_task_rewrite_audit(schema)
-    except (ValueError, OSError, schema_inspector.SchemaInspectionError):
-        state["rewritten_task"] = None
-        state["rewrite_error_message"] = TASK_REWRITE_INPUT_ERROR_MESSAGE
-        error_category = "input_validation"
-    else:
-        rewriter = _task_rewriter_module()
-        provider_called = True
-        try:
-            rewritten = rewriter.rewrite_task(
-                task_text,
-                schema,
-                advice=advice,
-                config=config,
-            )
-        except rewriter.TaskRewriteError as exc:
-            state["rewritten_task"] = None
-            state["rewrite_error_message"] = _format_task_rewrite_error(exc)
-            error_category = _classify_task_rewrite_error(exc)
-        else:
-            rewritten_task_text = rewritten.rewritten_task
-            provider = rewritten.provider
-            model = rewritten.model
-            state["rewritten_task"] = rewritten_task_text
-            state["rewrite_error_message"] = None
-            success = True
-    finally:
-        duration_ms = int((time.monotonic() - start) * 1000)
-        if audit_accepted:
-            _write_task_rewrite_audit_event(
-                duration_ms=duration_ms,
-                provider=provider,
-                model=model,
-                provider_called=provider_called,
-                success=success,
-                original_task=task_text,
-                rewritten_task=rewritten_task_text,
-                schema_summary=schema_summary,
-                error_category=error_category,
-            )
-        state["is_rewriting_task"] = False
-
-
-def _format_task_rewrite_error(exc: Exception) -> str:
-    message = str(exc).lower()
-    if "timeout" in message or "rate" in message:
-        return (
-            "Could not improve the task right now. "
-            "Try again later or edit the task manually."
-        )
-    return TASK_REWRITE_ERROR_MESSAGE
-
-
-def _classify_task_rewrite_error(exc: Exception) -> str:
-    message = str(exc).lower()
-    if "timeout" in message:
-        return "provider_timeout"
-    if "rate" in message:
-        return "provider_rate_limit"
-    return "provider_failure"
-
-
-def _inspect_single_file_prompt_coach_schema(
-    state: MutableMapping[str, object],
-    config: AppConfig,
-) -> SchemaReport:
-    if (
-        state.get("uploaded_file_bytes") is None
-        or state.get("uploaded_file_suffix") is None
-    ):
-        raise ValueError("Upload is required for Prompt Coach.")
-
-    with tempfile.TemporaryDirectory(prefix="snapscript_web_coach_") as temp_name:
-        temp_dir = Path(temp_name).resolve()
-        input_path = write_upload_to_temp_input(
-            temp_dir,
-            bytes(state["uploaded_file_bytes"]),
-            str(state["uploaded_file_suffix"]),
-        )
-        return schema_inspector.inspect(
-            input_path,
-            config=config,
-        )
-
-
-def _inspect_two_file_prompt_coach_schema(
-    state: MutableMapping[str, object],
-    config: AppConfig,
-) -> MultiFileSchemaReport:
-    if (
-        state.get("first_uploaded_file_bytes") is None
-        or state.get("first_uploaded_file_suffix") is None
-        or state.get("second_uploaded_file_bytes") is None
-        or state.get("second_uploaded_file_suffix") is None
-    ):
-        raise ValueError("Both uploads are required for Prompt Coach.")
-
-    validated_inputs = schema_inspector.validate_input_specs(
-        [
-            InputFileSpec(
-                name=str(state.get("first_logical_name", "")),
-                path=Path("first_input"),
-            ),
-            InputFileSpec(
-                name=str(state.get("second_logical_name", "")),
-                path=Path("second_input"),
-            ),
-        ]
-    )
-    with tempfile.TemporaryDirectory(prefix="snapscript_web_coach_") as temp_name:
-        temp_dir = Path(temp_name).resolve()
-        input_specs = [
-            InputFileSpec(
-                name=validated_inputs[0].name,
-                path=write_named_upload_to_temp_input(
-                    temp_dir,
-                    bytes(state["first_uploaded_file_bytes"]),
-                    str(state["first_uploaded_file_suffix"]),
-                    validated_inputs[0].name,
-                    1,
-                ),
-                display_filename=(
-                    str(state["first_uploaded_file_name"])
-                    if state.get("first_uploaded_file_name") is not None
-                    else None
-                ),
-            ),
-            InputFileSpec(
-                name=validated_inputs[1].name,
-                path=write_named_upload_to_temp_input(
-                    temp_dir,
-                    bytes(state["second_uploaded_file_bytes"]),
-                    str(state["second_uploaded_file_suffix"]),
-                    validated_inputs[1].name,
-                    2,
-                ),
-                display_filename=(
-                    str(state["second_uploaded_file_name"])
-                    if state.get("second_uploaded_file_name") is not None
-                    else None
-                ),
-            ),
-        ]
-        return schema_inspector.inspect_many(
-            input_specs,
-            config=config,
-        )
-
-
-def render_prompt_coach(
-    state: MutableMapping[str, object],
-    config: AppConfig,
-) -> None:
-    advice = build_prompt_coach_advice(
-        state,
-        config=config,
-    )
-    if advice is None:
-        return
-
-    st.subheader("Prompt Coach")
-    _render_prompt_coach_status(advice)
-    if advice.missing_details:
-        st.write("Missing details:")
-        for detail in advice.missing_details:
-            st.write(f"- {detail}")
-    if advice.suggestions:
-        st.write("Suggestions:")
-        for suggestion in advice.suggestions:
-            st.write(f"- {suggestion}")
-
-
-def render_ai_rewrite_controls(
-    state: MutableMapping[str, object],
-    config: AppConfig,
-) -> None:
-    st.subheader("AI Task Rewrite")
-    remaining_rewrites = get_remaining_rewrites(
-        int(state.get("rewrite_count", 0))
-    )
-    st.caption(f"Remaining AI rewrites this session: {remaining_rewrites}")
-    can_rewrite, _disabled_reason = can_improve_task(state)
-    rewrite_limit_reached = (
-        int(state.get("rewrite_count", 0)) >= MAX_REWRITES_PER_SESSION
-    )
-    if rewrite_limit_reached:
-        state["rewrite_error_message"] = "Rewrite limit reached for this session."
-    rewrite_disabled = (
-        not can_rewrite
-        or rewrite_limit_reached
-        or bool(state.get("is_rewriting_task", False))
-    )
-    if st.button("Improve task with AI", disabled=rewrite_disabled):
-        can_rewrite, validation_error = can_improve_task(state)
-        if not can_rewrite:
-            state["rewrite_error_message"] = (
-                validation_error or TASK_REWRITE_INPUT_ERROR_MESSAGE
-            )
-        else:
-            now = time.monotonic()
-            last_rewrite_timestamp = state.get("last_rewrite_timestamp")
-            accepted, rate_limit_error = check_rewrite_rate_limit(
-                int(state.get("rewrite_count", 0)),
-                (
-                    float(last_rewrite_timestamp)
-                    if last_rewrite_timestamp is not None
-                    else None
-                ),
-                now,
-            )
-            if not accepted:
-                state["rewrite_error_message"] = (
-                    rate_limit_error or "Cannot improve the task."
-                )
-            else:
-                begin_accepted_rewrite(state, now)
-                improve_task_with_ai(state, config)
-
-    rewrite_error = state.get("rewrite_error_message")
-    if rewrite_error:
-        st.error(str(rewrite_error))
-
-    rewritten_task = state.get("rewritten_task")
-    if rewritten_task:
-        st.write("Rewritten task:")
-        st.write(str(rewritten_task))
-        if st.button("Use rewritten task"):
-            state["task_text"] = str(rewritten_task)
-
-
-def _render_prompt_coach_status(advice: TaskAdvice) -> None:
-    status = advice.quality.replace("_", " ").title()
-    message = f"Status: {status}"
-    if advice.quality == "good":
-        st.success(message)
-    elif advice.quality == "too_vague":
-        st.warning(message)
-    else:
-        st.info(message)
-
-
-def derive_output_file_name(
-    uploaded_file_name: str | None,
-    suffix: str,
-) -> str:
-    normalized_suffix = validate_upload_suffix(f"output{suffix}")
-    fallback = f"snapscript_output{normalized_suffix}"
-    if not uploaded_file_name:
-        return fallback
-
-    posix_name = Path(uploaded_file_name).name
-    safe_name = PureWindowsPath(posix_name).name
-    stem = PureWindowsPath(safe_name).stem
-    safe_stem = re.sub(r"[^A-Za-z0-9._-]+", "_", stem).strip("._-")
-    if not safe_stem:
-        return fallback
-    return f"{safe_stem}_snapscript_output{normalized_suffix}"
-
-
-def derive_multi_output_file_name() -> str:
-    return "snapscript_output.csv"
-
-
-def load_output_preview(
-    output_bytes: bytes,
-    suffix: str,
-    max_rows: int = PREVIEW_MAX_ROWS,
-) -> pd.DataFrame:
-    normalized_suffix = validate_upload_suffix(f"output{suffix}")
-    buffer = BytesIO(output_bytes)
-    try:
-        if normalized_suffix == ".csv":
-            return pd.read_csv(buffer, nrows=max_rows)
-        return pd.read_excel(buffer, nrows=max_rows)
-    except Exception as exc:
-        raise ValueError("Could not read output preview.") from exc
-
-
-def download_mime_type(suffix: str) -> str:
-    normalized_suffix = validate_upload_suffix(f"output{suffix}")
-    return DOWNLOAD_MIME_TYPES[normalized_suffix]
-
-
-def _schema_summary_for_audit(schema: SchemaReport) -> dict[str, object]:
-    return {
-        "filename": schema.filename,
-        "file_type": schema.file_type,
-        "row_count": schema.row_count,
-        "file_size_bytes": schema.file_size_bytes,
-        "encoding": schema.encoding,
-        "sheet_names": schema.sheet_names,
-        "columns": [
-            {
-                "name": column.name,
-                "dtype": column.dtype,
-                "null_count": column.null_count,
-                "unique_count": column.unique_count,
-            }
-            for column in schema.columns
-        ],
-    }
-
-
-def _multi_schema_summary_for_audit(
-    multi_schema: MultiFileSchemaReport,
-) -> dict[str, object]:
-    return {
-        "files": [
-            {
-                "name": file_schema.name,
-                "schema": _schema_summary_for_audit(file_schema.schema),
-            }
-            for file_schema in multi_schema.files
-        ]
-    }
-
-
-def _schema_summary_for_task_rewrite_audit(
-    schema: SchemaReport | MultiFileSchemaReport,
-) -> dict[str, object]:
-    if isinstance(schema, MultiFileSchemaReport):
-        return _multi_schema_summary_for_audit(schema)
-    return _schema_summary_for_audit(schema)
-
-
-def _sha256_safe_json(value: object) -> str:
-    safe_value = audit_logger.safe_json_value(value)
-    serialized = json.dumps(safe_value, sort_keys=True)
-    return audit_logger.sha256_text(serialized)
-
-
-def _write_task_rewrite_audit_event(
-    *,
-    duration_ms: int,
-    provider: str,
-    model: str,
-    provider_called: bool,
-    success: bool,
-    original_task: str,
-    rewritten_task: str | None,
-    schema_summary: object | None,
-    error_category: str | None,
-) -> None:
-    event: dict[str, object] = {
-        "timestamp": datetime.now(timezone.utc).isoformat(),
-        "run_id": uuid.uuid4().hex,
-        "event_type": "task_rewrite",
-        "interface": AUDIT_INTERFACE,
-        "provider": provider,
-        "model": model,
-        "success": success,
-        "duration_ms": duration_ms,
-        "provider_called": provider_called,
-        "original_task_sha256": (
-            audit_logger.sha256_text(original_task) if original_task else None
-        ),
-        "rewritten_task_sha256": (
-            audit_logger.sha256_text(rewritten_task)
-            if success and rewritten_task
-            else None
-        ),
-        "schema_summary_sha256": (
-            _sha256_safe_json(schema_summary)
-            if schema_summary is not None
-            else None
-        ),
-        "error_category": error_category,
-    }
-    audit_logger.write_audit_event_best_effort(event, log_path=AUDIT_LOG_PATH)
-
-
-def _prompt_text_for_audit(prompt: PromptPayload) -> str:
-    return f"{prompt.system_prompt}\n\n{prompt.user_prompt}"
-
-
-def _write_streamlit_audit_event(
-    state: MutableMapping[str, object],
-    audit_metadata: MutableMapping[str, object],
-    *,
-    duration_ms: int,
-    error_category: str | None,
-    config: AppConfig,
-) -> None:
-    single_file = state["input_mode"] == INPUT_MODE_SINGLE
-    input_file_name = (
-        str(state["uploaded_file_name"])
-        if single_file
-        else ", ".join(
-            str(state[f"{slot}_uploaded_file_name"]) for slot in ("first", "second")
-        )
-    )
-    event = audit_logger.build_audit_event(
-        interface=AUDIT_INTERFACE,
-        provider=config.llm_provider,
-        model=config.default_model,
-        provider_called=bool(audit_metadata.get("provider_called", False)),
-        success=error_category is None,
-        duration_ms=duration_ms,
-        input_file_name=input_file_name,
-        input_file_bytes=bytes(state["uploaded_file_bytes"]) if single_file else None,
-        task_text=str(state["task_text"]),
-        schema_summary=audit_metadata.get("schema_summary"),
-        prompt_text=cast(str | None, audit_metadata.get("prompt_text")),
-        output_file_name=cast(str | None, state["output_file_name"]),
-        output_file_bytes=cast(bytes | None, state["output_bytes"]),
-        error_category=error_category,
-        system_prompt=cast(str | None, audit_metadata.get("system_prompt")),
-        user_prompt=cast(str | None, audit_metadata.get("user_prompt")),
-    )
-    audit_logger.write_audit_event_best_effort(event, log_path=AUDIT_LOG_PATH)
-
-
-def run_uploaded_task(
-    uploaded_file_bytes: bytes,
-    upload_suffix: str,
-    task_text: str,
-    uploaded_file_name: str | None = None,
-    audit_metadata: MutableMapping[str, object] | None = None,
-    config: AppConfig | None = None,
-) -> tuple[ExecutionResult, bytes | None, str | None]:
-    normalized_suffix = validate_upload_suffix(f"input{upload_suffix}")
-    normalized_task = validate_task_text(task_text)
-
-    with tempfile.TemporaryDirectory(prefix="snapscript_web_") as temp_name:
-        temp_dir = Path(temp_name).resolve()
-        input_path = write_upload_to_temp_input(
-            temp_dir,
-            uploaded_file_bytes,
-            normalized_suffix,
-        )
-        output_path = temp_dir / f"output{normalized_suffix}"
-
-        schema = schema_inspector.inspect(
-            input_path,
-            config=config,
-        )
-        if audit_metadata is not None:
-            audit_metadata["schema_summary"] = _schema_summary_for_audit(schema)
-
-        prompt = prompt_builder.build(
-            normalized_task,
-            schema,
-            config=config,
-        )
-        if audit_metadata is not None:
-            audit_metadata["prompt_text"] = _prompt_text_for_audit(prompt)
-            audit_metadata["system_prompt"] = prompt.system_prompt
-            audit_metadata["user_prompt"] = prompt.user_prompt
-            audit_metadata["provider_called"] = True
-
-        result = retry_handler.run(
-            prompt,
-            input_path,
-            output_path,
-            config=config,
-        )
-
-        if not result.success:
-            return result, None, None
-
-        return (
-            result,
-            output_path.read_bytes(),
-            derive_output_file_name(uploaded_file_name, normalized_suffix),
-        )
-
-
-def run_uploaded_tasks_many(
-    *,
-    first_file_bytes: bytes,
-    first_suffix: str,
-    first_logical_name: str,
-    first_uploaded_file_name: str | None,
-    second_file_bytes: bytes,
-    second_suffix: str,
-    second_logical_name: str,
-    second_uploaded_file_name: str | None,
-    task_text: str,
-    audit_metadata: MutableMapping[str, object] | None = None,
-    config: AppConfig | None = None,
-) -> tuple[ExecutionResult, bytes | None, str | None]:
-    validate_upload_size(first_file_bytes)
-    validate_upload_size(second_file_bytes)
-    normalized_first_suffix = validate_upload_suffix(f"input{first_suffix}")
-    normalized_second_suffix = validate_upload_suffix(f"input{second_suffix}")
-    normalized_task = validate_task_text(task_text)
-
-    try:
-        validated_inputs = schema_inspector.validate_input_specs(
-            [
-                InputFileSpec(
-                    name=first_logical_name,
-                    path=Path("first_input"),
-                    display_filename=first_uploaded_file_name,
-                ),
-                InputFileSpec(
-                    name=second_logical_name,
-                    path=Path("second_input"),
-                    display_filename=second_uploaded_file_name,
-                ),
-            ]
-        )
-    except schema_inspector.SchemaInspectionError as exc:
-        raise ValueError(str(exc)) from exc
-
-    with tempfile.TemporaryDirectory(prefix="snapscript_web_") as temp_name:
-        temp_dir = Path(temp_name).resolve()
-        first_input_path = write_named_upload_to_temp_input(
-            temp_dir,
-            first_file_bytes,
-            normalized_first_suffix,
-            validated_inputs[0].name,
-            1,
-        )
-        second_input_path = write_named_upload_to_temp_input(
-            temp_dir,
-            second_file_bytes,
-            normalized_second_suffix,
-            validated_inputs[1].name,
-            2,
-        )
-        input_specs = [
-            InputFileSpec(
-                name=validated_inputs[0].name,
-                path=first_input_path,
-                display_filename=first_uploaded_file_name,
-            ),
-            InputFileSpec(
-                name=validated_inputs[1].name,
-                path=second_input_path,
-                display_filename=second_uploaded_file_name,
-            ),
-        ]
-        output_path = temp_dir / "output.csv"
-
-        multi_schema = schema_inspector.inspect_many(
-            input_specs,
-            config=config,
-        )
-        if audit_metadata is not None:
-            audit_metadata["schema_summary"] = _multi_schema_summary_for_audit(
-                multi_schema
-            )
-
-        prompt = prompt_builder.build_many(
-            normalized_task,
-            multi_schema,
-            config=config,
-        )
-        if audit_metadata is not None:
-            audit_metadata["prompt_text"] = _prompt_text_for_audit(prompt)
-            audit_metadata["system_prompt"] = prompt.system_prompt
-            audit_metadata["user_prompt"] = prompt.user_prompt
-            audit_metadata["provider_called"] = True
-
-        result = retry_handler.run_many(
-            prompt,
-            input_specs,
-            output_path,
-            config=config,
-        )
-
-        if not result.success:
-            return result, None, None
-
-        return (
-            result,
-            output_path.read_bytes(),
-            derive_multi_output_file_name(),
-        )
-
-
-def format_execution_error(result: ExecutionResult) -> str:
-    message = result.stderr.strip() or result.stdout.strip()
-    if not message:
-        return "Execution failed."
-    return _format_pipeline_error(
-        message,
-        exit_code=result.exit_code,
-        default_to_sandbox=True,
-    )
-
-
-def format_exception_error(exc: Exception) -> str:
-    return _format_pipeline_error(
-        f"{type(exc).__name__}: {exc}",
-        default_to_sandbox=False,
-    )
 
 
 def _render_uploaded_file(slot: str | None = None) -> str | None:
@@ -1097,18 +66,25 @@ def _render_uploaded_file(slot: str | None = None) -> str | None:
     )
     if slot:
         name_key = f"{slot}_logical_name"
-        state[name_key] = st.text_input(
+        logical_name = st.text_input(
             f"{slot.title()} logical name", value=str(state[name_key])
         )
+        update_input_state(state, **{name_key: logical_name})
     if uploaded is None:
+        prefix = f"{slot}_" if slot else ""
+        update_input_state(state, **{
+            f"{prefix}uploaded_file_name": None,
+            f"{prefix}uploaded_file_bytes": None,
+            f"{prefix}uploaded_file_suffix": None,
+        })
         return None
 
     file_bytes = uploaded.getvalue()
     try:
         if slot:
-            store_named_uploaded_file(state, slot, uploaded.name, file_bytes)
+            web_inputs.store_named_uploaded_file(state, slot, uploaded.name, file_bytes)
         else:
-            store_uploaded_file(state, uploaded.name, file_bytes)
+            web_inputs.store_uploaded_file(state, uploaded.name, file_bytes)
     except ValueError:
         return str(state["error_message"])
     st.success(f"Uploaded {uploaded.name} ({len(file_bytes)} bytes).")
@@ -1117,18 +93,20 @@ def _render_uploaded_file(slot: str | None = None) -> str | None:
 
 def _render_input_controls() -> str | None:
     state = st.session_state
-    state["input_mode"] = st.radio(
+    input_mode = st.radio(
         "Input mode",
         [INPUT_MODE_SINGLE, INPUT_MODE_TWO],
         index=1 if state["input_mode"] == INPUT_MODE_TWO else 0,
     )
+    update_input_state(state, input_mode=input_mode)
     current_input_error: str | None = None
     slots = ("first", "second") if state["input_mode"] == INPUT_MODE_TWO else (None,)
     for slot in slots:
         current_input_error = _render_uploaded_file(slot) or current_input_error
-    state["task_text"] = st.text_area(
+    task_text = st.text_area(
         "Describe the transformation", value=str(state["task_text"])
     )
+    update_input_state(state, task_text=task_text)
     return current_input_error
 
 
@@ -1138,7 +116,7 @@ def _run_uploaded_inputs(
     config: AppConfig,
 ) -> tuple[ExecutionResult, bytes | None, str | None]:
     if state["input_mode"] == INPUT_MODE_TWO:
-        return run_uploaded_tasks_many(
+        return web_pipeline.run_uploaded_tasks_many(
             first_file_bytes=bytes(state["first_uploaded_file_bytes"]),
             first_suffix=str(state["first_uploaded_file_suffix"]),
             first_logical_name=str(state["first_logical_name"]),
@@ -1150,14 +128,16 @@ def _run_uploaded_inputs(
             task_text=str(state["task_text"]),
             audit_metadata=audit_metadata,
             config=config,
+            cache_state=state,
         )
-    return run_uploaded_task(
+    return web_pipeline.run_uploaded_task(
         bytes(state["uploaded_file_bytes"]),
         str(state["uploaded_file_suffix"]),
         str(state["task_text"]),
         uploaded_file_name=str(state["uploaded_file_name"]),
         audit_metadata=audit_metadata,
         config=config,
+        cache_state=state,
     )
 
 
@@ -1165,29 +145,25 @@ def _run_generate(config: AppConfig) -> None:
     state = st.session_state
     audit_start = time.monotonic()
     audit_metadata: dict[str, object] = {"provider_called": False}
-    error_category: str | None = "unknown_failure"
+    error_category: ErrorCategory | None = "unknown_failure"
     try:
         result, output_bytes, output_file_name = _run_uploaded_inputs(
             state, audit_metadata, config
         )
         if not result.success:
-            error_category = classify_error_category(
-                result.stderr.strip() or result.stdout.strip(),
-                exit_code=result.exit_code,
-                default_to_sandbox=True,
-            )
+            error_category = result.error_category or "sandbox_failure"
             mark_run_failure(state, format_execution_error(result))
         elif output_bytes is None or output_file_name is None:
             mark_run_failure(state, "Output file was not available.")
         else:
-            preview = load_output_preview(output_bytes, Path(output_file_name).suffix)
+            preview = web_inputs.load_output_preview(output_bytes, Path(output_file_name).suffix)
             mark_run_success(state, preview, output_bytes, output_file_name)
             error_category = None
     except Exception as exc:
-        error_category = classify_error_category(str(exc))
+        error_category = exception_category(exc)
         mark_run_failure(state, format_exception_error(exc))
     finally:
-        _write_streamlit_audit_event(
+        web_audit.write_streamlit_audit_event(
             state,
             audit_metadata,
             duration_ms=int((time.monotonic() - audit_start) * 1000),
@@ -1200,7 +176,7 @@ def _run_generate(config: AppConfig) -> None:
 
 def _handle_generate_click(config: AppConfig) -> None:
     state = st.session_state
-    can_run, validation_error = can_generate(state)
+    can_run, validation_error = web_inputs.can_generate(state)
     if not can_run:
         mark_validation_error(state, validation_error or "Cannot generate.")
         return
@@ -1225,7 +201,7 @@ def _render_generate_controls(
     state = st.session_state
     remaining_runs = get_remaining_runs(int(state["run_count"]))
     st.caption(f"Remaining runs this session: {remaining_runs}")
-    can_run, disabled_reason = can_generate(state)
+    can_run, disabled_reason = web_inputs.can_generate(state)
     current_validation_error = current_input_error or disabled_reason
     if (
         not can_run
@@ -1239,7 +215,7 @@ def _render_generate_controls(
         if current_input_error is None:
             mark_validation_error(state, current_validation_error)
     elif can_run or state["input_mode"] != INPUT_MODE_TWO:
-        clear_input_error_state(state)
+        web_inputs.clear_input_error_state(state)
 
     if st.button("Generate", disabled=not can_run):
         _handle_generate_click(config)
@@ -1250,7 +226,7 @@ def _render_output() -> None:
     st.subheader("Output")
     result_preview = state["result_preview"]
     if result_preview is not None:
-        st.caption(f"Showing up to {PREVIEW_MAX_ROWS} preview rows.")
+        st.caption(f"Showing up to {web_inputs.PREVIEW_MAX_ROWS} preview rows.")
         st.dataframe(result_preview)
     else:
         st.info("Output preview will appear here after a successful run.")
@@ -1262,7 +238,7 @@ def _render_output() -> None:
             label="Download output",
             data=output_bytes,
             file_name=str(output_file_name),
-            mime=download_mime_type(Path(str(output_file_name)).suffix),
+            mime=web_inputs.download_mime_type(Path(str(output_file_name)).suffix),
         )
 
     st.subheader("Errors")
@@ -1274,18 +250,21 @@ def _render_output() -> None:
 
 def main() -> None:
     initialize_session_state()
-    config = AppConfig()
     st.title("SnapScript")
+    try:
+        config = default_web_config()
+    except InputValidationError as exc:
+        st.error(f"Invalid SnapScript configuration. {format_error(exception_category(exc), exc)}")
+        return
     st.write("Transform a CSV or Excel file with a natural-language task.")
     render_runtime_sidebar(config)
 
     current_input_error = _render_input_controls()
-    render_prompt_coach(st.session_state, config)
-    render_ai_rewrite_controls(st.session_state, config)
+    web_assistant.render_prompt_coach(st.session_state, config)
+    web_assistant.render_ai_rewrite_controls(st.session_state, config)
     _render_generate_controls(config, current_input_error)
     _render_output()
 
 
-# The entry point for running the Streamlit app
 if __name__ == "__main__":
     main()

@@ -19,6 +19,7 @@ from pathlib import Path, PureWindowsPath
 from typing import Any
 
 from snapscript.config import AppConfig
+from snapscript.core._prompt_data import serialize_prompt_data
 from snapscript.core.models import (
     ColumnInfo,
     MultiFileSchemaReport,
@@ -30,6 +31,19 @@ from snapscript.core.models import (
 # parents[0] is "core" folder, so parents[1] is the root "snapscript" folder
 PROMPT_DIR = Path(__file__).resolve().parents[1] / "prompts"
 SYSTEM_PROMPT_PATH = PROMPT_DIR / "system.txt"
+
+
+class PromptBudgetError(ValueError):
+    """The complete prompt cannot fit the configured estimated budget."""
+
+
+def validate_budget(prompt: PromptPayload, config: AppConfig) -> None:
+    estimated = _estimate_tokens(f"{prompt.system_prompt}\n\n{prompt.user_prompt}")
+    if estimated > config.max_prompt_tokens:
+        raise PromptBudgetError(
+            f"Prompt is too large for the configured budget (estimated {estimated} > "
+            f"{config.max_prompt_tokens} tokens). Use fewer columns or a shorter task."
+        )
 
 
 def build(task_description: str, schema: SchemaReport, config: AppConfig | None = None) -> PromptPayload:
@@ -44,10 +58,12 @@ def build(task_description: str, schema: SchemaReport, config: AppConfig | None 
         schema_data = _truncate_schema_samples(schema_data)
         user_prompt = _build_user_prompt(task_description, schema_data)
 
-    return PromptPayload(
+    payload = PromptPayload(
         system_prompt=system_prompt,
         user_prompt=user_prompt,
     )
+    validate_budget(payload, config)
+    return payload
 
 
 # similar to build(), but for multiple files, the user prompt will include multiple file schemas 
@@ -62,10 +78,12 @@ def build_many(task_description: str, multi_schema: MultiFileSchemaReport, confi
         schema_data = _truncate_multi_schema_samples(schema_data)
         user_prompt = _build_multi_file_user_prompt(task_description, schema_data)
 
-    return PromptPayload(
+    payload = PromptPayload(
         system_prompt=system_prompt,
         user_prompt=user_prompt,
     )
+    validate_budget(payload, config)
+    return payload
 
 
 # load system.txt from SYSTEM_PROMPT_PATH
@@ -77,7 +95,7 @@ def _build_user_prompt(task_description: str, schema_data: dict[str, Any]) -> st
     # task_description is the user's prompt describing what they want to do with the data
     # ensure_ascii=False: keep the original mandarin characters in the schema instead of encoding them
     #  since LLM could understand the mandarin characters
-    schema_json = _escape_schema_json(json.dumps(schema_data, indent=2, ensure_ascii=False, default=str))
+    schema_json = serialize_prompt_data(schema_data)
     return (
         "## Input file information\n"
         "<schema>\n"
@@ -88,7 +106,8 @@ def _build_user_prompt(task_description: str, schema_data: dict[str, Any]) -> st
         "## Output requirement\n"
         "Read the input file by using INPUT_PATH as the input path variable. "
         "Write exactly one primary output file to OUTPUT_PATH. Infer the "
-        "output format from OUTPUT_PATH."
+        "output format from OUTPUT_PATH. When selected_sheet is provided, "
+        "read that exact Excel worksheet by name."
     )
 
 
@@ -112,7 +131,8 @@ def _build_multi_file_user_prompt(task_description: str, schema_data: list[dict[
         f"logical names provided above: {input_path_references}. "
         "Do not hardcode file paths. Do not use original uploaded paths. "
         "Write exactly one primary output file to OUTPUT_PATH. Infer the "
-        "output format from OUTPUT_PATH.\n\n"
+        "output format from OUTPUT_PATH. When selected_sheet is provided for "
+        "an input, read that exact Excel worksheet by name.\n\n"
         "## Join and merge guidance\n"
         'When the task asks for an inner join, use pandas merge how="inner". '
         'When the task asks for a left join or to keep all rows from the first file, use how="left". '
@@ -140,9 +160,7 @@ def _build_multi_file_user_prompt(task_description: str, schema_data: list[dict[
 
 def _build_file_schema_section(file_schema: dict[str, Any]) -> str:
     logical_name = _escape_xml_attribute(str(file_schema["logical_name"]))
-    schema_json = _escape_schema_json(
-        json.dumps(file_schema, indent=2, ensure_ascii=False, default=str)
-    )
+    schema_json = serialize_prompt_data(file_schema)
     return (
         f'<file name="{logical_name}">\n'
         f"{schema_json}\n"
@@ -159,6 +177,7 @@ def _schema_to_prompt_data(schema: SchemaReport) -> dict[str, Any]:
         "file_size_bytes": schema.file_size_bytes,
         "encoding": schema.encoding,
         "sheet_names": list(schema.sheet_names),
+        "selected_sheet": schema.selected_sheet,
         "columns": [_column_to_prompt_data(column) for column in schema.columns],
         "sample_rows": deepcopy(schema.sample_rows),
     }
@@ -209,12 +228,6 @@ def _truncate_multi_schema_samples(schema_data: list[dict[str, Any]]) -> list[di
 # roughly estimate the number of tokens, 1 token ≈ 4 characters
 def _estimate_tokens(text: str) -> int:
     return max(1, (len(text) + 3) // 4)
-
-
-# escape < and > in the schema JSON to avoid being misinterpreted as part of the prompt formatting
-#   \u003c/schema\u003e instead of </schema>
-def _escape_schema_json(schema_json: str) -> str:
-    return schema_json.replace("<", "\\u003c").replace(">", "\\u003e")
 
 
 # since the prompt use <file name="..."> XML-like format, 

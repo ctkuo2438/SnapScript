@@ -1830,7 +1830,6 @@ dependencies = [
     { name = "mcp" },
     { name = "openpyxl" },
     { name = "pandas" },
-    { name = "python-dotenv" },
     { name = "rich" },
     { name = "streamlit" },
 ]
@@ -1838,6 +1837,7 @@ dependencies = [
 [package.dev-dependencies]
 dev = [
     { name = "pytest" },
+    { name = "python-dotenv" },
 ]
 
 [package.metadata]
@@ -1847,13 +1847,15 @@ requires-dist = [
     { name = "mcp", specifier = ">=2.3,<3" },
     { name = "openpyxl", specifier = ">=3.1.5" },
     { name = "pandas", specifier = ">=2.3.3" },
-    { name = "python-dotenv", specifier = ">=1.2.2" },
     { name = "rich", specifier = ">=14.3.3" },
     { name = "streamlit", specifier = ">=1.40.0" },
 ]
 
 [package.metadata.requires-dev]
-dev = [{ name = "pytest", specifier = ">=9.0.3" }]
+dev = [
+    { name = "pytest", specifier = ">=9.0.3" },
+    { name = "python-dotenv", specifier = ">=1.2.2" },
+]
 
 [[package]]
 name = "sniffio"

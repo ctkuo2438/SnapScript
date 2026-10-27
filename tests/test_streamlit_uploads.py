@@ -4,26 +4,36 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
-from snapscript.interfaces import web
+from snapscript.interfaces import web, web_inputs
+from helpers.web_helpers import uploaded_state
+
+
+@pytest.mark.parametrize("first,second,expected", [("", "products", "required"), ("orders", "orders", "duplicate")])
+def test_two_file_logical_names_are_validated_before_generate(first, second, expected):
+    state = uploaded_state(two_files=True)
+    state.update(first_logical_name=first, second_logical_name=second)
+    allowed, message = web_inputs.can_generate(state)
+    assert not allowed
+    assert expected in message.lower()
 
 
 def test_normalize_task_text_strips_whitespace() -> None:
-    assert web.normalize_task_text("  Keep large orders. \n") == (
+    assert web_inputs.normalize_task_text("  Keep large orders. \n") == (
         "Keep large orders."
     )
 
 def test_validate_task_text_accepts_nonblank_text() -> None:
-    assert web.validate_task_text("  Keep large orders. ") == (
+    assert web_inputs.validate_task_text("  Keep large orders. ") == (
         "Keep large orders."
     )
 
 @pytest.mark.parametrize("task_text", ["", "   ", "\n\t"])
 def test_validate_task_text_rejects_blank_text(task_text: str) -> None:
     with pytest.raises(ValueError, match="Task description is required"):
-        web.validate_task_text(task_text)
+        web_inputs.validate_task_text(task_text)
 
 def test_can_generate_rejects_missing_upload() -> None:
-    can_run, message = web.can_generate(
+    can_run, message = web_inputs.can_generate(
         {
             "uploaded_file_bytes": None,
             "uploaded_file_suffix": None,
@@ -36,7 +46,7 @@ def test_can_generate_rejects_missing_upload() -> None:
     assert message == "Upload a CSV or Excel file before generating."
 
 def test_can_generate_rejects_blank_task_text() -> None:
-    can_run, message = web.can_generate(
+    can_run, message = web_inputs.can_generate(
         {
             "uploaded_file_bytes": b"order_id,total\n1,10\n",
             "uploaded_file_suffix": ".csv",
@@ -49,7 +59,7 @@ def test_can_generate_rejects_blank_task_text() -> None:
     assert message == "Task description is required."
 
 def test_can_generate_rejects_run_limit() -> None:
-    can_run, message = web.can_generate(
+    can_run, message = web_inputs.can_generate(
         {
             "uploaded_file_bytes": b"order_id,total\n1,10\n",
             "uploaded_file_suffix": ".csv",
@@ -62,7 +72,7 @@ def test_can_generate_rejects_run_limit() -> None:
     assert message == "Run limit reached for this session."
 
 def test_can_generate_accepts_valid_upload_and_task_text() -> None:
-    can_run, message = web.can_generate(
+    can_run, message = web_inputs.can_generate(
         {
             "uploaded_file_bytes": b"order_id,total\n1,10\n",
             "uploaded_file_suffix": ".csv",
@@ -86,25 +96,25 @@ def test_validate_upload_suffix_accepts_supported_suffixes(
     file_name: str,
     expected: str,
 ) -> None:
-    assert web.validate_upload_suffix(file_name) == expected
+    assert web_inputs.validate_upload_suffix(file_name) == expected
 
 def test_validate_upload_suffix_rejects_unsupported_suffix() -> None:
     with pytest.raises(ValueError, match="Unsupported file type"):
-        web.validate_upload_suffix("orders.txt")
+        web_inputs.validate_upload_suffix("orders.txt")
 
 def test_validate_upload_suffix_rejects_xls() -> None:
     with pytest.raises(ValueError, match="Unsupported file type: .xls"):
-        web.validate_upload_suffix("report.xls")
+        web_inputs.validate_upload_suffix("report.xls")
 
 def test_validate_upload_size_rejects_large_upload() -> None:
     with pytest.raises(ValueError, match="10 MB"):
-        web.validate_upload_size(web.MAX_UPLOAD_BYTES + 1)
+        web_inputs.validate_upload_size(web_inputs.MAX_UPLOAD_BYTES + 1)
 
 def test_store_uploaded_file_sets_name_suffix_and_bytes() -> None:
     state: dict[str, object] = {"error_message": "old error"}
     file_bytes = b"order_id,total\n1,10\n"
 
-    web.store_uploaded_file(state, "Orders.CSV", file_bytes)
+    web_inputs.store_uploaded_file(state, "Orders.CSV", file_bytes)
 
     assert state["uploaded_file_name"] == "Orders.CSV"
     assert state["uploaded_file_suffix"] == ".csv"
@@ -120,7 +130,7 @@ def test_store_uploaded_file_rejects_invalid_data_before_storing() -> None:
     }
 
     with pytest.raises(ValueError, match="Unsupported file type"):
-        web.store_uploaded_file(state, "orders.txt", b"not,csv\n")
+        web_inputs.store_uploaded_file(state, "orders.txt", b"not,csv\n")
 
     assert state["uploaded_file_name"] is None
     assert state["uploaded_file_suffix"] is None
@@ -132,7 +142,7 @@ def test_write_upload_to_temp_input_uses_internal_filename(
 ) -> None:
     file_bytes = b"order_id,total\n1,10\n"
 
-    input_path = web.write_upload_to_temp_input(
+    input_path = web_inputs.write_upload_to_temp_input(
         tmp_path,
         file_bytes,
         ".csv",
@@ -157,10 +167,10 @@ def test_derive_output_file_name_uses_safe_upload_stem(
     suffix: str,
     expected: str,
 ) -> None:
-    assert web.derive_output_file_name(uploaded_file_name, suffix) == expected
+    assert web_inputs.derive_output_file_name(uploaded_file_name, suffix) == expected
 
 def test_load_output_preview_reads_csv_bytes() -> None:
-    preview = web.load_output_preview(b"order_id,amount\n1,1500\n", ".csv")
+    preview = web_inputs.load_output_preview(b"order_id,amount\n1,1500\n", ".csv")
 
     assert list(preview.columns) == ["order_id", "amount"]
     assert preview.to_dict(orient="records") == [
@@ -169,7 +179,7 @@ def test_load_output_preview_reads_csv_bytes() -> None:
 
 def test_load_output_preview_limits_csv_rows() -> None:
     rows = ["row_id"] + [str(index) for index in range(150)]
-    preview = web.load_output_preview(
+    preview = web_inputs.load_output_preview(
         "\n".join(rows).encode("utf-8"),
         ".csv",
     )
@@ -184,7 +194,7 @@ def test_load_output_preview_reads_excel_bytes() -> None:
         index=False,
     )
 
-    preview = web.load_output_preview(buffer.getvalue(), ".xlsx")
+    preview = web_inputs.load_output_preview(buffer.getvalue(), ".xlsx")
 
     assert preview.to_dict(orient="records") == [
         {"order_id": 1, "amount": 1500}
@@ -195,9 +205,9 @@ def test_path_like_upload_name_does_not_affect_temp_filename(
 ) -> None:
     state: dict[str, object] = {}
     file_bytes = b"order_id,total\n1,10\n"
-    web.store_uploaded_file(state, "../../secret.csv", file_bytes)
+    web_inputs.store_uploaded_file(state, "../../secret.csv", file_bytes)
 
-    input_path = web.write_upload_to_temp_input(
+    input_path = web_inputs.write_upload_to_temp_input(
         tmp_path,
         bytes(state["uploaded_file_bytes"]),
         str(state["uploaded_file_suffix"]),

@@ -4,11 +4,30 @@ Track prompt changes during Days 8-10 prompt iteration.
 
 ## Unreleased
 
-- Initial changelog for prompt iteration notes.
+- Retry instructions preserve the original `INPUT_PATH`/`INPUT_PATHS` contract,
+  including one named MCP input. Invalid/empty/truncated generation responses
+  share the existing bounded retry budget with repairable execution failures.
+- Rewrite inputs are JSON-encoded and delimiters escaped through the same helper
+  as generation metadata. The rewrite system prompt treats schema/advice as
+  untrusted data and preserves exact decoded names/text.
+- Synthetic regressions and complete local outputs are recorded in
+  `docs/ai_csv_merge_verification.md`.
+
+## 2026-10-26 First-attempt gate and remaining review verification
+
+- Rebuilt the pinned sandbox image and ran 12 real-container checks, including
+  CSV encodings, XLSX/MCP output, source preservation, isolation and cleanup.
+- The real first-attempt gate now independently counts one generation per task
+  and disables both application and SDK retries. All ten CLI fixtures passed
+  on their first attempt with the configured Claude model, executing in Docker;
+  the gate took 47.22 seconds. No system prompt tuning was needed.
+- The ordinary ten-case CLI regression remains mocked regardless of opt-in flags.
+- Runtime prompt files are included in both wheel and sdist; an installed wheel
+  successfully loaded system/retry/rewrite prompts outside the source repository.
 
 ## 2026-10-10 AI CSV Merge Spec
 
-- Updated multi-file guidance in `core/prompt_builder.py` to follow `spec.md`:
+- Updated multi-file guidance in `core/prompt_builder.py` to follow `specs/csv-merge.md`:
   default inner join, infer only a sole common key, validate actual keys/types/nulls,
   preserve duplicate pairings, and report actionable input errors.
 - The first real-provider gate exposed an implicit `pid` to `sku` substitution.

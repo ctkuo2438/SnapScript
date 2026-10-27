@@ -5,12 +5,10 @@ Rule-based task quality advice for CSV/Excel transformation requests.
 from __future__ import annotations
 
 import re
-from typing import Literal
 
-from snapscript.core.models import MultiFileSchemaReport, SchemaReport, TaskAdvice
+from snapscript.core.models import AdviceQuality, MultiFileSchemaReport, SchemaReport, TaskAdvice
 
 
-AdviceQuality = Literal["good", "needs_detail", "too_vague"]
 OPERATION_WORDS = frozenset({
     "aggregate", "combine", "convert", "count", "deduplicate", "dedupe",
     "drop", "fill", "filter", "format", "group", "join", "keep", "merge",
@@ -22,7 +20,6 @@ TARGET_COLUMN_OPERATIONS = frozenset({
 })
 VAGUE_TASKS = frozenset({"clean this", "fix data", "process file", "make it better"})
 MULTI_FILE_COMBINE_WORDS = frozenset({"combine", "merge", "join"})
-JOIN_TYPE_WORDS = frozenset({"left", "right", "inner", "outer", "full"})
 FILTER_CONDITION_WORDS = frozenset({
     "after", "before", "contains", "equal", "equals", "greater", "less",
     "than", "where",
@@ -44,6 +41,15 @@ def advise_task(
             missing_details=["desired operation"],
             suggestions=[
                 "Describe the transformation, target columns, and expected output."
+            ],
+        )
+
+    if re.search(r"[\u3400-\u9fff\U00020000-\U0002fa1f]", normalized):
+        return TaskAdvice(
+            quality="not_assessed",
+            suggestions=[
+                "Automatic Prompt Coach currently evaluates English tasks. "
+                "You can still Generate or use AI Task Rewrite in your language."
             ],
         )
 
@@ -135,21 +141,6 @@ def _advise_multi_file(
                 "Name the column to join on, or say if the files should be stacked."
             )
 
-        if not words & JOIN_TYPE_WORDS:
-            missing.append("join type")
-            suggestions.append(
-                "Specify inner, left, right, or outer join behavior."
-            )
-
-        if words & {"left", "right", "outer", "full"} and not _has_retention_hint(
-            normalized_task,
-            file_names,
-        ):
-            missing.append("which file should retain all rows")
-            suggestions.append(
-                "State which file should keep all rows when using a left or right join."
-            )
-
     suggested_task = None
     if missing and file_names:
         suggested_task = (
@@ -232,15 +223,6 @@ def _has_join_key(
         for file_schema in schema.files
         for column in file_schema.schema.columns
     )
-
-
-def _has_retention_hint(
-    normalized_task: str,
-    file_names: list[str],
-) -> bool:
-    if not re.search(r"\b(?:keep|retain|all rows|all)\b", normalized_task):
-        return False
-    return any(_contains_phrase(normalized_task, file_name) for file_name in file_names)
 
 
 def _contains_phrase(normalized_task: str, phrase: str) -> bool:

@@ -3,7 +3,7 @@ from pathlib import Path
 import pytest
 
 from snapscript.config import AppConfig
-from snapscript.core import code_generator
+from snapscript.core import code_generator, provider
 from snapscript.core.code_generator import (
     EmptyProviderResponseError,
     InvalidGeneratedCodeError,
@@ -13,47 +13,8 @@ from snapscript.core.code_generator import (
 from snapscript.core.models import GeneratedScript, PromptPayload
 
 
-class _TextBlock:
-    def __init__(self, text: str) -> None:
-        self.text = text
-
-
-class _ThinkingBlock:
-    def __init__(self, text: object | None = None) -> None:
-        if text is not None:
-            self.text = text
-
-
-class _Usage:
-    input_tokens = 12
-    output_tokens = 8
-
-
-class _Response:
-    def __init__(self, text: str) -> None:
-        self.content = [_TextBlock(text)]
-        self.usage = _Usage()
-
-
-class _Messages:
-    def __init__(self, response: _Response | Exception) -> None:
-        self.response = response
-        self.calls: list[dict[str, object]] = []
-
-    def create(self, **kwargs: object) -> _Response:
-        self.calls.append(kwargs)
-        if isinstance(self.response, Exception):
-            raise self.response
-        return self.response
-
-
-class _FakeAnthropic:
-    instances: list["_FakeAnthropic"] = []
-    response: _Response | Exception = _Response("print('default')")
-
-    def __init__(self) -> None:
-        self.messages = _Messages(self.response)
-        self.instances.append(self)
+from helpers.provider_helpers import FakeAnthropic as _FakeAnthropic, Response as _Response, TextBlock as _TextBlock
+from types import SimpleNamespace
 
 
 def _payload() -> PromptPayload:
@@ -70,7 +31,7 @@ def test_generate_calls_configured_provider_with_separate_prompts(
     _FakeAnthropic.response = _Response(
         "Here is the script:\n```python\nimport pandas as pd\nprint('ok')\n```\nDone."
     )
-    monkeypatch.setattr(code_generator, "Anthropic", _FakeAnthropic)
+    monkeypatch.setattr(provider, "Anthropic", _FakeAnthropic)
     monkeypatch.setattr(
         code_generator,
         "AppConfig",
@@ -99,7 +60,7 @@ def test_generate_sends_temperature_when_explicitly_configured(
 ) -> None:
     _FakeAnthropic.instances = []
     _FakeAnthropic.response = _Response("```python\nprint('ok')\n```")
-    monkeypatch.setattr(code_generator, "Anthropic", _FakeAnthropic)
+    monkeypatch.setattr(provider, "Anthropic", _FakeAnthropic)
 
     code_generator.generate(_payload(), config=AppConfig(temperature=0.0))
 
@@ -110,7 +71,7 @@ def test_generate_sends_temperature_when_explicitly_configured(
 def test_generate_uses_model_override(monkeypatch: pytest.MonkeyPatch) -> None:
     _FakeAnthropic.instances = []
     _FakeAnthropic.response = _Response("```python\nprint('ok')\n```")
-    monkeypatch.setattr(code_generator, "Anthropic", _FakeAnthropic)
+    monkeypatch.setattr(provider, "Anthropic", _FakeAnthropic)
 
     generated = code_generator.generate(_payload(), model="fallback-model")
 
@@ -128,7 +89,7 @@ def test_generate_rejects_unsupported_provider(
         lambda: AppConfig(llm_provider="other"),
     )
     monkeypatch.setattr(
-        code_generator,
+        provider,
         "Anthropic",
         lambda: pytest.fail("Anthropic client should not be constructed"),
     )
@@ -142,7 +103,7 @@ def test_generate_wraps_provider_failures_without_prompt_content(
 ) -> None:
     _FakeAnthropic.instances = []
     _FakeAnthropic.response = RuntimeError("upstream failure for user prompt")
-    monkeypatch.setattr(code_generator, "Anthropic", _FakeAnthropic)
+    monkeypatch.setattr(provider, "Anthropic", _FakeAnthropic)
 
     with pytest.raises(ProviderCallError) as exc_info:
         code_generator.generate(_payload())
@@ -155,10 +116,10 @@ def test_generate_wraps_client_construction_failures(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     class BrokenAnthropic:
-        def __init__(self) -> None:
+        def __init__(self, **kwargs: object) -> None:
             raise RuntimeError("missing api key")
 
-    monkeypatch.setattr(code_generator, "Anthropic", BrokenAnthropic)
+    monkeypatch.setattr(provider, "Anthropic", BrokenAnthropic)
 
     with pytest.raises(ProviderCallError) as exc_info:
         code_generator.generate(_payload())
@@ -171,7 +132,7 @@ def test_generate_raises_for_empty_response(
 ) -> None:
     _FakeAnthropic.instances = []
     _FakeAnthropic.response = _Response("   ")
-    monkeypatch.setattr(code_generator, "Anthropic", _FakeAnthropic)
+    monkeypatch.setattr(provider, "Anthropic", _FakeAnthropic)
 
     with pytest.raises(EmptyProviderResponseError):
         code_generator.generate(_payload())
@@ -182,7 +143,7 @@ def test_generate_raises_for_invalid_python(
 ) -> None:
     _FakeAnthropic.instances = []
     _FakeAnthropic.response = _Response("```python\nfor\n```")
-    monkeypatch.setattr(code_generator, "Anthropic", _FakeAnthropic)
+    monkeypatch.setattr(provider, "Anthropic", _FakeAnthropic)
 
     with pytest.raises(InvalidGeneratedCodeError):
         code_generator.generate(_payload())
@@ -190,9 +151,9 @@ def test_generate_raises_for_invalid_python(
 
 def test_extract_text_skips_thinking_blocks() -> None:
     class _ResponseWithThinking:
-        content = [_ThinkingBlock(), _ThinkingBlock(text=123), _TextBlock("print('hi')")]
+        content = [SimpleNamespace(), SimpleNamespace(text=123), _TextBlock("print('hi')")]
 
-    assert code_generator._extract_text(_ResponseWithThinking()) == "print('hi')"
+    assert provider.extract_text(_ResponseWithThinking()) == "print('hi')"
 
 
 def test_code_generator_core_has_no_ui_execution_or_safety_dependencies() -> None:

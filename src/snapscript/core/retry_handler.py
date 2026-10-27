@@ -1,24 +1,4 @@
-'''
-Streamlit / CLI
-  -> schema_inspector.inspect(...)
-  -> prompt_builder.build(...)
-      -> PromptPayload
-  -> retry_handler.run(...) # main entry for code generation + execution with retry logic
-      -> code_generator.generate(...)
-      -> safety_checker.check(...)
-      -> execution_backend.execute(...)
-          -> sandbox_executor or docker_sandbox_executor
-
-Files:
-- schema_inspector.py        -> read input file schema
-- prompt_builder.py          -> create prompt
-- code_generator.py          -> call LLM to generate code
-- safety_checker.py          -> check generated code for safety issues
-- execution_backend.py       -> select subprocess / Docker executor
-- sandbox_executor.py        -> subprocess execution
-- docker_sandbox_executor.py -> Docker execution
-'''
-
+"""Generate, check, and execute with at most three model attempts."""
 from __future__ import annotations
 
 from pathlib import Path
@@ -33,7 +13,6 @@ from snapscript.core import (
 )
 from snapscript.core.models import (
     ExecutionResult,
-    GeneratedScript,
     InputFileSpec,
     PromptPayload,
 )
@@ -41,7 +20,7 @@ from snapscript.core.models import (
 
 PROMPT_DIR = Path(__file__).resolve().parents[1] / "prompts"
 RETRY_PROMPT_PATH = PROMPT_DIR / "retry.txt"
-MAX_MODEL_CALLS = 3 # 1. ori prompt, 2. retry with same model, 3. retry with fallback model (claude opus-4)
+MAX_MODEL_CALLS = 3
 
 
 def run(
@@ -74,6 +53,7 @@ def run_many(
             success=False,
             stderr=str(exc),
             exit_code=1,
+            error_category="input_validation",
         )
     return _run_with_inputs(
         prompt,
@@ -84,106 +64,66 @@ def run_many(
     )
 
 
-# single-file and multi-file use the same retry logic,
-#   the only difference is the type of input spec (Path vs list[InputFileSpec])
 def _run_with_inputs(
-    prompt: PromptPayload,
-    input_path: Path | list[InputFileSpec], # single or multi input spec
-    output_path: Path,
-    model: str | None = None,
-    config: AppConfig | None = None,
+    prompt: PromptPayload, input_path: Path | list[InputFileSpec], output_path: Path,
+    model: str | None = None, config: AppConfig | None = None,
 ) -> ExecutionResult:
     config = config if config is not None else AppConfig()
-    destination_error = validate_destination(input_path, output_path)
-    if destination_error:
-        return ExecutionResult(success=False, stderr=destination_error, exit_code=1)
-    max_model_calls = min(config.max_retries + 1, MAX_MODEL_CALLS)
+    error = validate_destination(input_path, output_path, overwrite=config.overwrite_output)
+    if error:
+        return ExecutionResult(success=False, stderr=error, exit_code=1, error_category="input_validation")
+    unavailable = execution_backend.preflight(config)
+    if unavailable is not None:
+        return unavailable
+    max_calls = min(config.max_retries + 1, MAX_MODEL_CALLS)
     current_prompt = prompt
-    last_result: ExecutionResult | None = None
-
-    for call_number in range(max_model_calls):
-        generation_model = (
-            config.fallback_model # fallback model is claude-opus-4-20250514
-            if call_number > 0 and call_number == max_model_calls - 1
-            else model
-        )
-        # 1. generate code with the current prompt and LLM model
-        # if model = None, use default model, else use fallback model
-        generated = code_generator.generate(
-            current_prompt,
-            model=generation_model,
-            config=config,
-        )
-
-        # 2. check code safety
-        safety_result = safety_checker.check(
-            generated.code,
-            config=config,
-        )
-        if not safety_result.is_safe or not safety_result.ast_valid:
-            return _safety_failure(safety_result.violations)
-     
-        # 3. execute the generated code
-        # subprocess -> sandbox_executor.execute(...)
-        # docker     -> docker_sandbox_executor.execute(...)
-        result = execution_backend.execute(
-            generated.code,
-            input_path,
-            output_path,
-            config=config,
-        )
-        last_result = result
-        # if execution is successful, return the result immediately without retrying
-        if result.success:
+    api_calls = []
+    for attempt in range(max_calls):
+        selected_model = config.fallback_model if attempt > 0 and attempt == max_calls - 1 else model
+        try:
+            generated = code_generator.generate(current_prompt, model=selected_model, config=config)
+        except code_generator.CodeGenerationError as exc:
+            api_calls.extend(exc.api_calls)
+            recoverable = isinstance(exc, (
+                code_generator.InvalidGeneratedCodeError, code_generator.EmptyProviderResponseError,
+            ))
+            if not recoverable or attempt == max_calls - 1:
+                exc.api_calls = list(api_calls)
+                raise
+            current_prompt = _build_retry_prompt(prompt, str(exc), exc.response_text)
+            continue
+        if generated.api_call is not None:
+            api_calls.append(generated.api_call)
+        safety = safety_checker.check(generated.code, config=config)
+        if not safety.is_safe or not safety.ast_valid:
+            result = _safety_failure(safety.violations)
+        else:
+            result = execution_backend.execute(generated.code, input_path, output_path, config=config)
+        result.api_calls = list(api_calls)
+        if not result.success and result.error_category is None:
+            result.error_category = "sandbox_failure"
+        if result.success or attempt == max_calls - 1 or not _should_retry_execution(result):
             return result
-        # if this was the last allowed attempt, return the result without retrying
-        if call_number == max_model_calls - 1:
-            return result
-        # not every failure should trigger a retry, for example if the error is a timeout or no stderr message, 
-        #   it's unlikely that retrying will help, so we can skip retries in those cases
-        if not _should_retry_execution(result):
-            return result # return the failure result without retrying
-
-        # build retry prompt with the original system prompt and user prompt, 
-        #   plus the previous error message and the previously generated code
-        current_prompt = _build_retry_prompt(prompt, result.stderr, generated)
-    
-    # if max_model_calls = 0
-    if last_result is not None:
-        return last_result
-    return ExecutionResult(success=False, stderr="No generation attempt was made")
+        current_prompt = _build_retry_prompt(prompt, result.stderr, generated.code)
+    raise AssertionError("AppConfig must allow at least one model attempt")
 
 
-# result failed, not timeout, and stderr had error message, then we should retry
-#   since retry prompt need error context
 def _should_retry_execution(result: ExecutionResult) -> bool:
-    if result.success:
-        return False
-    if _is_timeout(result):
-        return False
-    if "Input validation:" in result.stderr or result.stderr.strip() == "Output is empty":
-        return False
-    return bool(result.stderr.strip())
-
-
-# timeout not retry
-def _is_timeout(result: ExecutionResult) -> bool:
-    return result.exit_code == -1 or "timed out" in result.stderr.lower()
+    return not result.success and result.error_category in {"sandbox_failure", "output_validation"}
 
 
 def _build_retry_prompt(
     original_prompt: PromptPayload,
     previous_error: str,
-    generated: GeneratedScript,
+    previous_code: str,
 ) -> PromptPayload:
     template = RETRY_PROMPT_PATH.read_text(encoding="utf-8")
     retry_user_prompt = template.format(
         previous_error=previous_error,
-        previous_code=generated.code,
+        previous_code=previous_code,
     )
     return PromptPayload(
         system_prompt=original_prompt.system_prompt,
-        # combine ori user prompt with retry context
         user_prompt=(
             f"{original_prompt.user_prompt}\n\n"
             "## Retry context\n"
@@ -192,11 +132,11 @@ def _build_retry_prompt(
     )
 
 
-# if is safety violation, return a failure ExecutionResult with the violation details in stderr
 def _safety_failure(violations: list[str]) -> ExecutionResult:
     details = "\n".join(violations)
     return ExecutionResult(
         success=False,
         stderr=f"Safety violation: {details}",
         exit_code=1,
+        error_category="safety_violation",
     )
